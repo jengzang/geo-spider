@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Local config
+config/settings.yaml
+
+# Logs
+logs/*
+!logs/.gitkeep
+*.log
+*.out
+
+# Data artifacts
+data/raw/*
+!data/raw/.gitkeep
+data/interim/*
+!data/interim/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/exports/*
+!data/exports/.gitkeep
+
+# SQLite and backups
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+backups/
+
+# Editors and tooling
+.idea/
+.vscode/
+.python-version
+*.swp
+*.swo
+
+# OS files
+.DS_Store

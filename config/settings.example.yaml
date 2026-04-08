@@ -1,0 +1,26 @@
+app:
+  env: development
+  log_level: INFO
+
+paths:
+  sqlite_path: data/processed/geonode_spider.db
+  export_dir: data/exports
+  raw_dir: data/raw
+  interim_dir: data/interim
+  processed_dir: data/processed
+
+crawler:
+  request_timeout: 15
+  request_retries: 3
+  sleep_min_seconds: 0.5
+  sleep_max_seconds: 1.5
+  backoff_base_seconds: 1.0
+
+proxy:
+  enabled: false
+  pool: []
+
+geo:
+  provider: mock
+  api_key: ""
+  endpoint: ""
