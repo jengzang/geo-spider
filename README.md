@@ -27,11 +27,15 @@
 - JSON / CSV / Excel / SQLite 导出器
 - 随机 UA、代理池、限速、重试等请求层骨架
 - `mock` 数据源与 `mock` 地理编码器
+- 民政部 `dmfw` 汉字集 contain 抓取正式模式
 - 基础测试骨架
 
-当前还未内置真实官方站点的完整生产适配器，但接口和扩展点已经准备好，后续可以继续接入：
+当前已经内置第一个真实站点模式：
 
-- 民政部地名信息服务平台
+- 民政部地名信息服务平台 `dmfw.mca.gov.cn`
+
+后续仍可继续接入：
+
 - 统计局行政区划数据
 - 高德 / 百度 / 腾讯地图地理编码服务
 
@@ -122,7 +126,19 @@ python3 -m geonode_spider init-db
 python3 -m geonode_spider run-pipeline --source mock --export all
 ```
 
-### 5. 查看当前配置
+### 5. 运行民政部汉字集抓取
+
+```bash
+python3 -m geonode_spider run-dmfw-chars --chars 尾村坑山 --export all --resume
+```
+
+说明：
+
+- `--chars`：输入一个汉字集，程序会逐字执行 contain 查询
+- `--resume`：从 `data/raw/` 下的进度文件断点续跑
+- 程序会在结果过多时自动按行政区 `code` 分片，再在本地 SQLite 中按 `source_id` 去重
+
+### 6. 查看当前配置
 
 ```bash
 python3 -m geonode_spider show-config
@@ -138,6 +154,7 @@ python3 -m geonode_spider show-config
 python3 -m geonode_spider sample-data
 python3 -m geonode_spider export --format all
 python3 -m geonode_spider run-pipeline --source mock --export all
+python3 -m geonode_spider run-dmfw-chars --chars 尾村坑山 --export all --resume
 ```
 
 ### 脚本入口
@@ -146,6 +163,7 @@ python3 -m geonode_spider run-pipeline --source mock --export all
 python3 scripts/bootstrap_sample_data.py
 python3 scripts/export_data.py --format all
 python3 scripts/run_spider.py --source mock --export all
+python3 scripts/run_dmfw_chars.py --chars 尾村坑山 --export all --resume
 ```
 
 ## 数据输出
@@ -181,9 +199,10 @@ python3 scripts/run_spider.py --source mock --export all
 
 ## 数据模型与存储
 
-当前 SQLite 以两张核心表为主：
+当前 SQLite 以三张核心表为主：
 
 - `regions`：行政区划与标准地名主数据
+- `dmfw_places`：民政部地名查询结果去重主表
 - `crawl_runs`：每次抓取任务的运行记录
 
 这样设计的目标是：
@@ -203,7 +222,6 @@ pytest -v
 ## 开发路线
 
 - 接入统计局行政区划适配器
-- 接入民政部地名平台适配器
 - 增加真实地图服务地理编码 provider
 - 增加增量更新与版本化策略
 - 增加更多查询与筛选导出能力

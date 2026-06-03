@@ -4,19 +4,18 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
-from geonode_spider.exporters.base import BaseExporter
-from geonode_spider.models.region import RegionNode
+from geonode_spider.exporters.base import BaseExporter, TabularRecord
 
 
 class ExcelExporter(BaseExporter):
     format_name = "xlsx"
 
-    def export(self, regions: list[RegionNode], destination: Path) -> Path:
+    def export(self, records: list[TabularRecord], destination: Path) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
         workbook = Workbook()
         sheet = workbook.active
         sheet.title = "regions"
-        rows = [region.to_dict() for region in regions]
+        rows = [record.to_dict() for record in records]
         if rows:
             headers = list(rows[0].keys())
             sheet.append(headers)

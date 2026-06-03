@@ -7,6 +7,7 @@ from typing import Sequence
 
 from geonode_spider.config.settings import load_settings
 from geonode_spider.services.bootstrap import ensure_runtime_directories, export_from_database, run_sample_pipeline
+from geonode_spider.services.dmfw import run_dmfw_chars_pipeline
 from geonode_spider.storage.sqlite import SQLiteRegionRepository
 from geonode_spider.utils.logging import setup_logging
 
@@ -30,6 +31,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run-pipeline", help="Run the sample pipeline.")
     run_parser.add_argument("--source", default="mock")
     run_parser.add_argument("--export", dest="formats", default="all", help="Comma-separated formats or 'all'.")
+
+    dmfw_parser = subparsers.add_parser("run-dmfw-chars", help="Run contain-based dmfw collection for a character set.")
+    dmfw_parser.add_argument("--chars", required=True, help="Character set used for contain-based searches.")
+    dmfw_parser.add_argument("--export", dest="formats", default="all", help="Comma-separated formats or 'all'.")
+    dmfw_parser.add_argument("--resume", action="store_true", help="Resume from the saved dmfw partition progress file.")
 
     return parser
 
@@ -83,6 +89,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 indent=2,
             )
         )
+        return 0
+
+    if args.command == "run-dmfw-chars":
+        result = run_dmfw_chars_pipeline(
+            settings=settings,
+            chars=args.chars,
+            export_formats=_parse_formats(args.formats),
+            resume=bool(args.resume),
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
     parser.error("unsupported command")

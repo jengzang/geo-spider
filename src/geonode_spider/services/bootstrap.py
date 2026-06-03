@@ -6,6 +6,7 @@ from geonode_spider.config.settings import Settings
 from geonode_spider.exporters.manager import ExportManager
 from geonode_spider.models.region import PipelineResult
 from geonode_spider.pipelines.sample import SamplePipeline
+from geonode_spider.services.dmfw import run_dmfw_chars_pipeline
 from geonode_spider.storage.sqlite import SQLiteRegionRepository
 
 

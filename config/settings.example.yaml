@@ -24,3 +24,9 @@ geo:
   provider: mock
   api_key: ""
   endpoint: ""
+
+dmfw:
+  base_url: https://dmfw.mca.gov.cn
+  page_size: 100
+  partition_threshold: 3000
+  search_type: 模糊匹配

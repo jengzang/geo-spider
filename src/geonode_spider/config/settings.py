@@ -27,6 +27,10 @@ DEFAULTS: dict[str, Any] = {
     "geo_provider": "mock",
     "geo_api_key": "",
     "geo_endpoint": "",
+    "dmfw_base_url": "https://dmfw.mca.gov.cn",
+    "dmfw_page_size": 100,
+    "dmfw_partition_threshold": 3000,
+    "dmfw_search_type": "模糊匹配",
 }
 
 
@@ -49,6 +53,10 @@ class Settings:
     geo_provider: str = "mock"
     geo_api_key: str = ""
     geo_endpoint: str = ""
+    dmfw_base_url: str = "https://dmfw.mca.gov.cn"
+    dmfw_page_size: int = 100
+    dmfw_partition_threshold: int = 3000
+    dmfw_search_type: str = "模糊匹配"
 
     def __post_init__(self) -> None:
         self.proxy_pool = list(self.proxy_pool or [])
@@ -93,6 +101,10 @@ def load_settings(
         geo_provider=str(merged["geo_provider"]),
         geo_api_key=str(merged["geo_api_key"]),
         geo_endpoint=str(merged["geo_endpoint"]),
+        dmfw_base_url=str(merged["dmfw_base_url"]),
+        dmfw_page_size=int(merged["dmfw_page_size"]),
+        dmfw_partition_threshold=int(merged["dmfw_partition_threshold"]),
+        dmfw_search_type=str(merged["dmfw_search_type"]),
     )
 
 
@@ -122,6 +134,13 @@ def _load_yaml_values(yaml_file: Path) -> dict[str, Any]:
         "geo_provider": data.get("geo", {}).get("provider", DEFAULTS["geo_provider"]),
         "geo_api_key": data.get("geo", {}).get("api_key", DEFAULTS["geo_api_key"]),
         "geo_endpoint": data.get("geo", {}).get("endpoint", DEFAULTS["geo_endpoint"]),
+        "dmfw_base_url": data.get("dmfw", {}).get("base_url", DEFAULTS["dmfw_base_url"]),
+        "dmfw_page_size": data.get("dmfw", {}).get("page_size", DEFAULTS["dmfw_page_size"]),
+        "dmfw_partition_threshold": data.get("dmfw", {}).get(
+            "partition_threshold",
+            DEFAULTS["dmfw_partition_threshold"],
+        ),
+        "dmfw_search_type": data.get("dmfw", {}).get("search_type", DEFAULTS["dmfw_search_type"]),
     }
 
 
@@ -160,6 +179,13 @@ def _map_prefixed_env(values: dict[str, str | None]) -> dict[str, Any]:
         "GEONODE_GEO_PROVIDER": ("geo_provider", DEFAULTS["geo_provider"]),
         "GEONODE_GEO_API_KEY": ("geo_api_key", DEFAULTS["geo_api_key"]),
         "GEONODE_GEO_ENDPOINT": ("geo_endpoint", DEFAULTS["geo_endpoint"]),
+        "GEONODE_DMFW_BASE_URL": ("dmfw_base_url", DEFAULTS["dmfw_base_url"]),
+        "GEONODE_DMFW_PAGE_SIZE": ("dmfw_page_size", DEFAULTS["dmfw_page_size"]),
+        "GEONODE_DMFW_PARTITION_THRESHOLD": (
+            "dmfw_partition_threshold",
+            DEFAULTS["dmfw_partition_threshold"],
+        ),
+        "GEONODE_DMFW_SEARCH_TYPE": ("dmfw_search_type", DEFAULTS["dmfw_search_type"]),
     }
     parsed: dict[str, Any] = {}
     for env_key, (target_key, default) in mapping.items():
