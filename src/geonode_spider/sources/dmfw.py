@@ -20,7 +20,7 @@ class DmfwClientProtocol(Protocol):
         size: int = 100,
         place_type_code: str = "",
         year: int = 0,
-        search_type: str = "模糊匹配",
+        search_type: str = "模糊",
     ) -> dict[str, object]:
         ...
 
@@ -36,10 +36,11 @@ class DmfwProgressProtocol(Protocol):
 @dataclass(slots=True)
 class DmfwCollector:
     client: DmfwClientProtocol
+    root_divisions: list[DmfwDivision] | None = None
     partition_threshold: int = 3000
     page_size: int = 100
     place_type_code: str = ""
-    search_type: str = "模糊匹配"
+    search_type: str = "模糊"
 
     def collect_for_chars(
         self,
@@ -48,7 +49,7 @@ class DmfwCollector:
         progress_tracker: DmfwProgressProtocol | None = None,
     ) -> list[DmfwPlaceRecord]:
         unique_chars = _normalize_chars(chars)
-        root_divisions = self.client.list_divisions("0")
+        root_divisions = self.root_divisions or self.client.list_divisions("0")
         deduped: dict[str, DmfwPlaceRecord] = {}
 
         for char in unique_chars:
@@ -137,7 +138,7 @@ class DmfwCollector:
                         record,
                         keyword=keyword,
                         partition_code=partition_code,
-                        source_url="https://dmfw.mca.gov.cn/stname/listPub",
+                        source_url="https://dmfw.mca.gov.cn/9095/stname/listPub",
                     )
                 )
         return normalized

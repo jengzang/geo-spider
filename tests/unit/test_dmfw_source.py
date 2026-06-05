@@ -6,6 +6,7 @@ from geonode_spider.sources.dmfw import DmfwCollector
 
 class FakeDmfwClient:
     def __init__(self) -> None:
+        self.list_division_calls: list[str] = []
         self.search_calls: list[tuple[str, str, int, int]] = []
         self.root_divisions = [
             DmfwDivision(code="35", name="福建省", parent_code="0", level="province"),
@@ -55,6 +56,7 @@ class FakeDmfwClient:
         }
 
     def list_divisions(self, code: str) -> list[DmfwDivision]:
+        self.list_division_calls.append(code)
         if code == "0":
             return self.root_divisions
         return self.children.get(code, [])
@@ -68,7 +70,7 @@ class FakeDmfwClient:
         size: int = 100,
         place_type_code: str = "",
         year: int = 0,
-        search_type: str = "模糊匹配",
+        search_type: str = "模糊",
     ) -> dict[str, object]:
         _ = (size, place_type_code, year, search_type)
         self.search_calls.append((keyword, code, page, size))
@@ -89,13 +91,16 @@ class FakeDmfwClient:
             latitude=24.1,
             keyword="尾",
             partition_code=code,
-            source_url="https://dmfw.mca.gov.cn/stname/listPub",
+            source_url="https://dmfw.mca.gov.cn/9095/stname/listPub",
+            match_mode="contain",
         )
 
 
 def test_collector_recursively_partitions_and_deduplicates_places() -> None:
+    client = FakeDmfwClient()
     collector = DmfwCollector(
-        client=FakeDmfwClient(),
+        client=client,
+        root_divisions=client.root_divisions,
         partition_threshold=3000,
         page_size=100,
     )
@@ -104,3 +109,4 @@ def test_collector_recursively_partitions_and_deduplicates_places() -> None:
 
     assert {place.standard_name for place in results} == {"东村", "山尾", "尾村", "溪尾"}
     assert [place.source_id for place in results].count("shared") == 1
+    assert client.list_division_calls == ["35"]
