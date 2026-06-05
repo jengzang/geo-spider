@@ -12,6 +12,12 @@ class DmfwDivision:
     name: str
     parent_code: str
     level: str
+    source_name: str = "dmfw"
+    captured_at: str = field(default_factory=utc_now_iso)
+    updated_at: str = field(default_factory=utc_now_iso)
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
 
 
 @dataclass(slots=True)
@@ -34,11 +40,76 @@ class DmfwPlaceRecord:
     roman_alphabet_spelling: str = ""
     ethnic_minorities_writing: str = ""
     raw_payload_json: str = ""
+    match_mode: str = "contain"
+    fetched_at_utc: str = field(default_factory=utc_now_iso)
     captured_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
+    geometry_type: str = ""
+    coordinates_json: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
+    def to_total_single_dict(self) -> dict[str, object]:
+        return {
+            "source_id": self.source_id,
+            "place_code": self.place_code,
+            "standard_name": self.standard_name,
+            "place_type": self.place_type,
+            "place_type_code": self.place_type_code,
+            "province_name": self.province_name,
+            "city_name": self.city_name,
+            "area_name": self.area_name,
+            "area_code": self.area_code,
+            "longitude": self.longitude,
+            "latitude": self.latitude,
+            "captured_at": self.captured_at,
+            "updated_at": self.updated_at,
+        }
+
+    def to_total_multi_dict(self) -> dict[str, object]:
+        return {
+            "source_id": self.source_id,
+            "place_code": self.place_code,
+            "standard_name": self.standard_name,
+            "place_type": self.place_type,
+            "place_type_code": self.place_type_code,
+            "province_name": self.province_name,
+            "city_name": self.city_name,
+            "area_name": self.area_name,
+            "area_code": self.area_code,
+            "geometry_type": self.geometry_type,
+            "coordinates_json": self.coordinates_json,
+            "captured_at": self.captured_at,
+            "updated_at": self.updated_at,
+        }
+
+    def has_single_coordinate(self) -> bool:
+        coordinates = self.coordinates
+        return len(coordinates) == 1 and len(coordinates[0]) >= 2
+
+    def has_multi_coordinates(self) -> bool:
+        return len(self.coordinates) > 1
+
+    @property
+    def coordinates(self) -> list[list[float]]:
+        if not self.coordinates_json:
+            return []
+        try:
+            payload = json.loads(self.coordinates_json)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(payload, list):
+            return []
+        normalized: list[list[float]] = []
+        for item in payload:
+            if not isinstance(item, list) or len(item) < 2:
+                continue
+            try:
+                normalized.append([float(item[0]), float(item[1])])
+            except (TypeError, ValueError):
+                continue
+        return normalized
 
     @classmethod
     def from_api_record(
@@ -48,8 +119,11 @@ class DmfwPlaceRecord:
         keyword: str,
         partition_code: str,
         source_url: str,
+        match_mode: str,
+        fetched_at_utc: str,
     ) -> "DmfwPlaceRecord":
-        longitude, latitude = _extract_coordinates(record.get("gdm"))
+        geometry_type, coordinates = _extract_geometry(record.get("gdm"))
+        longitude, latitude = _extract_primary_point(coordinates)
         return cls(
             source_id=str(record["id"]),
             place_code=str(record.get("place_code", "")),
@@ -68,6 +142,10 @@ class DmfwPlaceRecord:
             roman_alphabet_spelling=str(record.get("roman_alphabet_spelling", "")),
             ethnic_minorities_writing=str(record.get("ethnic_minorities_writing", "")),
             raw_payload_json=json.dumps(record, ensure_ascii=False, sort_keys=True),
+            match_mode=match_mode,
+            fetched_at_utc=fetched_at_utc,
+            geometry_type=geometry_type,
+            coordinates_json=json.dumps(coordinates, ensure_ascii=False),
         )
 
     @classmethod
@@ -91,8 +169,12 @@ class DmfwPlaceRecord:
             roman_alphabet_spelling=str(row["roman_alphabet_spelling"]),
             ethnic_minorities_writing=str(row["ethnic_minorities_writing"]),
             raw_payload_json=str(row["raw_payload_json"]),
+            match_mode=str(row.get("match_mode", "contain")),
+            fetched_at_utc=str(row.get("fetched_at_utc", row["captured_at"])),
             captured_at=str(row["captured_at"]),
             updated_at=str(row["updated_at"]),
+            geometry_type=str(row.get("geometry_type", "")),
+            coordinates_json=str(row.get("coordinates_json", "")),
         )
 
 
@@ -102,16 +184,28 @@ def _optional_str(value: object) -> str | None:
     return str(value)
 
 
-def _extract_coordinates(gdm: object) -> tuple[float | None, float | None]:
+def _extract_geometry(gdm: object) -> tuple[str, list[list[float]]]:
     if not isinstance(gdm, dict):
-        return None, None
+        return "", []
+    geometry_type = str(gdm.get("type", ""))
     coordinates = gdm.get("coordinates")
-    if not isinstance(coordinates, list) or not coordinates:
+    if not isinstance(coordinates, list):
+        return geometry_type, []
+    normalized: list[list[float]] = []
+    for item in coordinates:
+        if not isinstance(item, list) or len(item) < 2:
+            continue
+        try:
+            normalized.append([float(item[0]), float(item[1])])
+        except (TypeError, ValueError):
+            continue
+    return geometry_type, normalized
+
+
+def _extract_primary_point(coordinates: list[list[float]]) -> tuple[float | None, float | None]:
+    if len(coordinates) != 1:
         return None, None
     first = coordinates[0]
-    if not isinstance(first, list) or len(first) < 2:
+    if len(first) < 2:
         return None, None
-    try:
-        return float(first[0]), float(first[1])
-    except (TypeError, ValueError):
-        return None, None
+    return float(first[0]), float(first[1])

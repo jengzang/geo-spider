@@ -128,15 +128,48 @@ python3 -m geonode_spider run-pipeline --source mock --export all
 
 ### 5. 运行民政部汉字集抓取
 
+先同步并缓存省级行政区 code：
+
 ```bash
-python3 -m geonode_spider run-dmfw-chars --chars 尾村坑山 --export all --resume
+python3 -m geonode_spider sync-dmfw-divisions
+```
+
+推荐直接写入累计总库且只导出 db 的正式模式命令：
+
+```bash
+python3 -m geonode_spider run-dmfw-chars \
+  --chars 村 \
+  --match-mode contain \
+  --write-total-db \
+  --total-db-path data/processed/dmfw_places_total.db \
+  --resume
+```
+
+也可以使用任务级 JSON（示例配置默认也只导出 db；如需 json/csv/xlsx，请在 JSON 中显式添加 `export`）：
+
+```bash
+python3 -m geonode_spider run-dmfw-chars --json config/dmfw-task.example.json
 ```
 
 说明：
 
-- `--chars`：输入一个汉字集，程序会逐字执行 contain 查询
+- `sync-dmfw-divisions`：预先同步并缓存省级行政区 code
+- `--chars`：输入一个汉字集，程序会逐字执行查询；例如传 `村` 就是全国“村”字模糊匹配
+- `--match-mode`：支持 `contain` / `exact`，默认 `contain`
+- `--province-codes`：可选，传一个或多个省份 code，限制抓取范围；不传则遍历全部已缓存省份
+- `--export`：默认只导出 `db`；只有显式传 `json` / `csv` / `xlsx` / `all` 时才额外导出这些文件
+- `--json`：读取 dmfw 任务级 JSON 配置，适合常态化跑批
 - `--resume`：从 `data/raw/` 下的进度文件断点续跑
-- 程序会在结果过多时自动按行政区 `code` 分片，再在本地 SQLite 中按 `source_id` 去重
+- `--flush-batch-size`：增量落库批次，默认每 `1000` 条落库一次
+- `--max-runtime-seconds`：可选运行时长上限；不传则默认一直跑到完成
+- `--write-total-db`：把结果累计写入总库，按 `source_id` 去重 upsert
+- `--total-db-path`：指定总库路径；不传时默认写到 `data/processed/dmfw_places_total.db`
+- `--no-write-run-db`：可选，不写默认运行库，只维护总库
+- 程序使用 Python `requests` 直接请求 dmfw，不会调用本机 Chrome 浏览器
+- 当前实现会先从已缓存省级 code 起步；对 `村` 的真实验证显示，全国 `code=''` 的 `total` 与 33 个标准省级 code 累加结果一致
+- 程序会先请求第一页读取 `total`，若结果过多会自动按行政区 `code` 递归分片；分片后每个分片内部会自动按页抓取直到该分片的最后一页
+- 当前站点的超界页行为不是报空，而是重复返回最后一页，因此项目不能依赖“翻到空页停止”，而是必须依赖第一页返回的 `total` 精确计算总页数；当前实现已经按这个方式处理
+- run 库 `dmfw_places` 会保留 `geometry_type` 与 `coordinates_json`；total 库会把单点写入 `dmfw_places_single`，把多坐标 geometry 写入 `dmfw_places_multi`
 
 ### 6. 查看当前配置
 
@@ -154,7 +187,8 @@ python3 -m geonode_spider show-config
 python3 -m geonode_spider sample-data
 python3 -m geonode_spider export --format all
 python3 -m geonode_spider run-pipeline --source mock --export all
-python3 -m geonode_spider run-dmfw-chars --chars 尾村坑山 --export all --resume
+python3 -m geonode_spider run-dmfw-chars --chars 村 --match-mode contain --write-total-db --total-db-path data/processed/dmfw_places_total.db --resume
+python3 -m geonode_spider run-dmfw-chars --json config/dmfw-task.example.json
 ```
 
 ### 脚本入口
@@ -163,7 +197,7 @@ python3 -m geonode_spider run-dmfw-chars --chars 尾村坑山 --export all --res
 python3 scripts/bootstrap_sample_data.py
 python3 scripts/export_data.py --format all
 python3 scripts/run_spider.py --source mock --export all
-python3 scripts/run_dmfw_chars.py --chars 尾村坑山 --export all --resume
+python3 scripts/run_dmfw_chars.py --chars 村 --match-mode contain --write-total-db --total-db-path data/processed/dmfw_places_total.db --resume
 ```
 
 ## 数据输出
@@ -199,16 +233,34 @@ python3 scripts/run_dmfw_chars.py --chars 尾村坑山 --export all --resume
 
 ## 数据模型与存储
 
-当前 SQLite 以三张核心表为主：
+当前 SQLite 以三类核心数据为主：
 
 - `regions`：行政区划与标准地名主数据
-- `dmfw_places`：民政部地名查询结果去重主表
+- `dmfw_places`：dmfw 运行库，保留抓取上下文、原始响应字段映射与完整几何信息
 - `crawl_runs`：每次抓取任务的运行记录
+
+当启用 `--write-total-db` 时，累计总库会拆成两张表：
+
+- `dmfw_places_single`：仅存单坐标记录，保留 `longitude` / `latitude`
+- `dmfw_places_multi`：仅存多坐标记录，保留 `geometry_type` + `coordinates_json`
+
+当前几何处理规则：
+
+- run 库 `dmfw_places` 会保存 `geometry_type` 与 `coordinates_json`
+- 若 `gdm.coordinates` 只有一个点，则额外写入 `longitude` / `latitude`
+- 若 `gdm.coordinates` 有多个点（如 `linestring`），则不再只取第一个点；完整坐标数组进入 `coordinates_json`
+- total 库会按坐标数量自动分流到 `dmfw_places_single` / `dmfw_places_multi`
+- 单点 / 多点两张 total 表都按 `source_id` 做 upsert 去重
+
+关于全国/逐省 total：
+
+- 已用真实接口验证，`村` 字全国 `code=''` 查询得到的 `total` 与 33 个标准省级 code 累加结果一致
+- 因此当前逐省起步策略在 `村` 这个样本上没有发现 total 级遗漏
 
 这样设计的目标是：
 
-- 先把数据规范化落地
-- 再从统一数据层导出多种格式
+- run 库保留完整抓取与调试上下文
+- total 库只保留累计主数据，并且不丢失多坐标 geometry
 - 后续新增数据源时尽量不改导出链路
 
 ## 测试
