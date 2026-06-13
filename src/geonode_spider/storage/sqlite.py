@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Iterable
 
 from geonode_spider.models.place import DmfwDivision, DmfwPlaceRecord
 from geonode_spider.models.region import CrawlRunRecord, RegionNode
@@ -126,6 +125,14 @@ CREATE TABLE IF NOT EXISTS dmfw_places_multi (
 """
 
 
+def _configure_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA temp_store=MEMORY")
+    return conn
+
+
 class SQLiteDivisionRepository:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
@@ -136,6 +143,7 @@ class SQLiteDivisionRepository:
             conn.execute(CREATE_CRAWL_RUNS_TABLE)
             conn.execute(CREATE_DMFW_DIVISIONS_TABLE)
             conn.execute(CREATE_DMFW_PLACES_TABLE)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_dmfw_divisions_parent_code ON dmfw_divisions(parent_code)")
             _ensure_dmfw_place_columns(conn)
             conn.commit()
 
@@ -170,8 +178,7 @@ class SQLiteDivisionRepository:
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+        return _configure_connection(conn)
 
 
 class SQLiteRegionRepository:
@@ -184,6 +191,7 @@ class SQLiteRegionRepository:
             conn.execute(CREATE_REGIONS_TABLE)
             conn.execute(CREATE_CRAWL_RUNS_TABLE)
             conn.execute(CREATE_DMFW_PLACES_TABLE)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_regions_level ON regions(level)")
             _ensure_dmfw_place_columns(conn)
             conn.commit()
 
@@ -260,8 +268,7 @@ class SQLiteRegionRepository:
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+        return _configure_connection(conn)
 
 
 class SQLitePlaceRepository:
@@ -365,8 +372,7 @@ class SQLitePlaceRepository:
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+        return _configure_connection(conn)
 
 
 class SQLiteTotalPlaceRepository:
@@ -480,8 +486,7 @@ class SQLiteTotalPlaceRepository:
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+        return _configure_connection(conn)
 
 
 def _single_total_row_to_record(row: dict[str, object]) -> DmfwPlaceRecord:

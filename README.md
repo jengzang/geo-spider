@@ -147,8 +147,37 @@ python3 -m geonode_spider run-dmfw-chars \
 
 也可以使用任务级 JSON（示例配置默认也只导出 db；如需 json/csv/xlsx，请在 JSON 中显式添加 `export`）：
 
-```bash
-python3 -m geonode_spider run-dmfw-chars --json config/dmfw-task.example.json
+```json
+{
+  "chars": "村",
+  "match_mode": "contain",
+  "province_codes": ["11", "12"],
+  "resume": true,
+  "flush_batch_size": 1000,
+  "max_runtime_seconds": 120,
+  "sync_divisions_first": true,
+  "no_write_run_db": true,
+  "write_total_db": true,
+  "total_db_path": "data/processed/dmfw_places_total.db"
+}
+```
+
+如果你需要显式导出全部格式，可以把 JSON 写成：
+
+```json
+{
+  "chars": "村",
+  "match_mode": "contain",
+  "province_codes": ["11", "12"],
+  "resume": true,
+  "export": ["json", "csv", "xlsx", "db"],
+  "flush_batch_size": 1000,
+  "max_runtime_seconds": 120,
+  "sync_divisions_first": true,
+  "no_write_run_db": true,
+  "write_total_db": true,
+  "total_db_path": "data/processed/dmfw_places_total.db"
+}
 ```
 
 说明：

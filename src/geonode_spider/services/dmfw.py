@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from geonode_spider.config.settings import Settings
 from geonode_spider.crawler.profile import RequestProfile
@@ -97,21 +101,30 @@ class DmfwProgressTracker:
     chars: str
     resume: bool
     _state: dict[str, object] = field(init=False, repr=False, default_factory=dict)
+    _completed_set: set[str] = field(init=False, repr=False, default_factory=set)
 
     def __post_init__(self) -> None:
         if self.resume and self.path.exists():
             self._state = json.loads(self.path.read_text(encoding="utf-8"))
         else:
             self._state = {"chars": self.chars, "completed": []}
+        completed = self._state.get("completed", [])
+        if isinstance(completed, list):
+            self._completed_set = {str(item) for item in completed}
+        else:
+            self._completed_set = set()
+        self._state["completed"] = list(completed) if isinstance(completed, list) else []
+        if not (self.resume and self.path.exists()):
             self._save()
 
     def is_completed(self, keyword: str, code: str) -> bool:
-        return f"{keyword}|{code}" in set(self._state["completed"])
+        return f"{keyword}|{code}" in self._completed_set
 
     def mark_completed(self, keyword: str, code: str) -> None:
         token = f"{keyword}|{code}"
-        if token not in self._state["completed"]:
-            self._state["completed"].append(token)
+        if token not in self._completed_set:
+            self._completed_set.add(token)
+            self._state["completed"] = list(self._state.get("completed", [])) + [token]
             self._save()
 
     def _save(self) -> None:
@@ -189,18 +202,45 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
         allowed = set(options.province_codes)
         province_divisions = [division for division in province_divisions if division.code in allowed]
 
+    division_names: dict[str, str] = {}
+    if settings.sqlite_path.exists():
+        try:
+            import sqlite3
+            with sqlite3.connect(settings.sqlite_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='dmfw_divisions'")
+                if cursor.fetchone():
+                    rows = conn.execute("SELECT code, name FROM dmfw_divisions").fetchall()
+                    division_names = {row["code"]: row["name"] for row in rows}
+        except Exception:
+            pass
+
+    for div in province_divisions:
+        division_names[div.code] = div.name
+
+    logger.info(
+        f"开始抓取地名任务，匹配模式: {options.match_mode}，待处理字符: {options.chars}，"
+        f"待处理省级区划数: {len(province_divisions)}"
+    )
+    if options.resume:
+        logger.info("已启用断点续传模式 (resume)")
+
     progress = DmfwProgressTracker(
         path=settings.raw_dir / _build_progress_filename(options.chars, options.match_mode, options.province_codes),
         chars=options.chars,
         resume=options.resume,
     )
 
+    requested_formats = _normalize_formats(options.export_formats or ["db"])
+    db_only_export = set(requested_formats) == {"db"}
     run_id = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
     started_at = datetime.now(UTC).isoformat()
     started_monotonic = time.monotonic()
     flush_count = 0
     persisted_total = 0
+    fetched_total = 0
     deduped: dict[str, DmfwPlaceRecord] = {}
+    division_children_cache: dict[str, list[DmfwDivision]] = {}
 
     try:
         for char in _normalize_chars(options.chars):
@@ -216,38 +256,62 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
                     match_mode=options.match_mode,
                     started_monotonic=started_monotonic,
                     max_runtime_seconds=options.max_runtime_seconds,
+                    division_names=division_names,
+                    division_children_cache=division_children_cache,
                 ):
                     deduped[place.source_id] = place
+                    fetched_total += 1
                     if len(deduped) >= options.flush_batch_size:
                         batch = list(deduped.values())
                         if options.write_run_db:
                             repository.upsert_places(batch)
-                            persisted_total = repository.count_places()
                         if total_repository is not None:
                             total_repository.upsert_places(batch)
                         flush_count += 1
+                        logger.info(
+                            f"已批量写入 {len(batch)} 个地名至数据库。当前此运行累计获取 {fetched_total} 个地名，"
+                            f"累计写入批次数: {flush_count}"
+                        )
                         deduped.clear()
         if deduped:
             batch = list(deduped.values())
             if options.write_run_db:
                 repository.upsert_places(batch)
-                persisted_total = repository.count_places()
             if total_repository is not None:
                 total_repository.upsert_places(batch)
             flush_count += 1
+            logger.info(
+                f"已批量写入最后一批 {len(batch)} 个地名至数据库。当前此运行累计获取 {fetched_total} 个地名，"
+                f"累计写入批次数: {flush_count}"
+            )
             deduped.clear()
+
+        sqlite_export_path = settings.sqlite_path if options.write_run_db else (total_db_path or settings.sqlite_path)
         if options.write_run_db:
-            stored_places = repository.list_places()
+            persisted_total = repository.count_places()
         elif total_repository is not None:
-            stored_places = total_repository.list_places()
             persisted_total = total_repository.count_places()
         else:
+            persisted_total = 0
+
+        if db_only_export:
+            stored_places: list[DmfwPlaceRecord] = []
+            place_count = persisted_total
+        elif options.write_run_db:
+            stored_places = repository.list_places()
+            place_count = len(stored_places)
+        elif total_repository is not None:
+            stored_places = total_repository.list_places()
+            place_count = len(stored_places)
+        else:
             stored_places = []
+            place_count = 0
+
         exported = export_dmfw_places(
             records=stored_places,
             export_dir=settings.export_dir,
-            sqlite_path=settings.sqlite_path if options.write_run_db else (total_db_path or settings.sqlite_path),
-            formats=options.export_formats or ["db"],
+            sqlite_path=sqlite_export_path,
+            formats=requested_formats,
         )
         finished_at = datetime.now(UTC).isoformat()
         repository.record_crawl_run(
@@ -255,20 +319,27 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
                 run_id=run_id,
                 source_name="dmfw",
                 status="success",
-                item_count=len(stored_places),
+                item_count=place_count,
                 started_at=started_at,
                 finished_at=finished_at,
             )
         )
-    except Exception as exc:
+        logger.info(
+            f"抓取任务顺利完成。累计抓取地名数: {fetched_total}，"
+            f"数据库已保存总数: {persisted_total}，累计写入批次数: {flush_count}"
+        )
+    except BaseException as exc:
         if deduped:
             batch = list(deduped.values())
             if options.write_run_db:
                 repository.upsert_places(batch)
-                persisted_total = repository.count_places()
             if total_repository is not None:
                 total_repository.upsert_places(batch)
             flush_count += 1
+            logger.info(
+                f"异常退出前：已批量写入最后一批 {len(batch)} 个地名至数据库。当前此运行累计获取 {fetched_total} 个地名，"
+                f"累计写入批次数: {flush_count}"
+            )
             deduped.clear()
         finished_at = datetime.now(UTC).isoformat()
         repository.record_crawl_run(
@@ -282,11 +353,12 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
                 error_message=str(exc),
             )
         )
+        logger.error(f"抓取任务遇到异常中断: {exc}", exc_info=True)
         raise
 
     return {
         "run_id": run_id,
-        "place_count": len(stored_places),
+        "place_count": place_count,
         "persisted_count": persisted_total,
         "flush_count": flush_count,
         "source_name": "dmfw",
@@ -324,7 +396,17 @@ def export_dmfw_places(
         destination = export_dir / "dmfw_places.db"
         if destination.exists():
             destination.unlink()
-        shutil.copy2(sqlite_path, destination)
+        sqlite_export_path = sqlite_path
+        wal_path = sqlite_path.with_name(f"{sqlite_path.name}-wal")
+        shm_path = sqlite_path.with_name(f"{sqlite_path.name}-shm")
+        if wal_path.exists():
+            with sqlite3.connect(sqlite_path) as checkpoint_conn:
+                checkpoint_conn.execute("PRAGMA wal_checkpoint(FULL)")
+        shutil.copy2(sqlite_export_path, destination)
+        if wal_path.exists():
+            shutil.copy2(wal_path, destination.with_name(f"{destination.name}-wal"))
+        if shm_path.exists():
+            shutil.copy2(shm_path, destination.with_name(f"{destination.name}-shm"))
         exported["db"] = str(destination)
 
     return exported
@@ -342,8 +424,12 @@ def _iter_collect_partition(
     match_mode: str,
     started_monotonic: float,
     max_runtime_seconds: int | None,
+    division_names: dict[str, str],
+    division_children_cache: dict[str, list[DmfwDivision]],
 ):
+    name = division_names.get(code, code)
     if progress_tracker.is_completed(keyword, code):
+        logger.info(f"区划 {name} ({code}) 字符 '{keyword}' 已在历史进度中完成，跳过")
         return
     _assert_runtime_budget(started_monotonic, max_runtime_seconds)
     first_page = client.search_places(
@@ -354,9 +440,18 @@ def _iter_collect_partition(
         search_type=search_type,
     )
     total = int(first_page.get("total", 0))
+    logger.info(f"正在查询字符 '{keyword}'，区划: {name} ({code})，总数: {total}")
+
     if total > partition_threshold:
-        children = client.list_divisions(code)
+        if code in division_children_cache:
+            children = division_children_cache[code]
+        else:
+            children = client.list_divisions(code)
+            division_children_cache[code] = children
         if children:
+            logger.info(f"区划 {name} ({code}) 的总数 {total} 超过阈值 {partition_threshold}，开始细分下级区划抓取...")
+            for child in children:
+                division_names[child.code] = child.name
             for child in children:
                 yield from _iter_collect_partition(
                     client=client,
@@ -369,12 +464,18 @@ def _iter_collect_partition(
                     match_mode=match_mode,
                     started_monotonic=started_monotonic,
                     max_runtime_seconds=max_runtime_seconds,
+                    division_names=division_names,
+                    division_children_cache=division_children_cache,
                 )
             progress_tracker.mark_completed(keyword, code)
             return
-    fetched_at_utc = utc_now_iso()
-    yield from _normalize_records(first_page.get("records", []), keyword=keyword, partition_code=code, match_mode=match_mode, fetched_at_utc=fetched_at_utc)
+
     total_pages = max(1, (total + page_size - 1) // page_size)
+    fetched_at_utc = utc_now_iso()
+    records = first_page.get("records", [])
+    logger.info(f"区划 {name} ({code}) [总数 {total}]: 正在处理第 1/{total_pages} 页，获取到 {len(records)} 个地名")
+    yield from _normalize_records(first_page.get("records", []), keyword=keyword, partition_code=code, match_mode=match_mode, fetched_at_utc=fetched_at_utc)
+
     for page in range(2, total_pages + 1):
         _assert_runtime_budget(started_monotonic, max_runtime_seconds)
         payload = client.search_places(
@@ -385,6 +486,8 @@ def _iter_collect_partition(
             search_type=search_type,
         )
         fetched_at_utc = utc_now_iso()
+        page_records = payload.get("records", [])
+        logger.info(f"区划 {name} ({code}) [总数 {total}]: 正在处理第 {page}/{total_pages} 页，获取到 {len(page_records)} 个地名")
         yield from _normalize_records(payload.get("records", []), keyword=keyword, partition_code=code, match_mode=match_mode, fetched_at_utc=fetched_at_utc)
     progress_tracker.mark_completed(keyword, code)
 

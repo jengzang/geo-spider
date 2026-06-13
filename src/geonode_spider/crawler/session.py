@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import requests
@@ -8,6 +9,8 @@ from geonode_spider.crawler.profile import RequestProfile
 from geonode_spider.crawler.proxies import StaticProxyProvider
 from geonode_spider.crawler.rate_limiter import RateLimiter
 from geonode_spider.crawler.user_agents import DefaultUserAgentProvider
+
+logger = logging.getLogger(__name__)
 
 
 class SpiderSession:
@@ -41,6 +44,19 @@ class SpiderSession:
             if proxies is None and self.profile.use_proxy:
                 proxies = self.proxy_provider.get_proxy()
 
+            proxy_str = "direct"
+            if proxies:
+                proxy_url = proxies.get("https") or proxies.get("http")
+                if proxy_url:
+                    from urllib.parse import urlparse
+                    try:
+                        parsed = urlparse(proxy_url)
+                        proxy_str = parsed.netloc.split("@")[-1] or parsed.netloc
+                    except Exception:
+                        proxy_str = str(proxy_url)
+
+            logger.info(f"发送请求: {method} {url} | 出口/代理IP: {proxy_str}")
+
             try:
                 response = self.session.request(
                     method=method,
@@ -55,6 +71,7 @@ class SpiderSession:
             except requests.RequestException as exc:
                 failures += 1
                 last_error = exc
+                logger.warning(f"请求失败 ({failures}/{self.profile.retries}): {exc} | 出口/代理IP: {proxy_str}")
 
         if last_error is None:
             raise RuntimeError("request failed without an exception")
