@@ -53,13 +53,13 @@ class DmfwCollector:
         deduped: dict[str, DmfwPlaceRecord] = {}
 
         for char in unique_chars:
-            for division in root_divisions:
-                for place in self._collect_partition(
-                    keyword=char,
-                    code=division.code,
-                    progress_tracker=progress_tracker,
-                ):
-                    deduped.setdefault(place.source_id, place)
+            for place in self._collect_partition(
+                keyword=char,
+                code="",
+                progress_tracker=progress_tracker,
+                children_override=root_divisions,
+            ):
+                deduped.setdefault(place.source_id, place)
 
         return list(deduped.values())
 
@@ -69,6 +69,7 @@ class DmfwCollector:
         keyword: str,
         code: str,
         progress_tracker: DmfwProgressProtocol | None = None,
+        children_override: list[DmfwDivision] | None = None,
     ) -> list[DmfwPlaceRecord]:
         if progress_tracker is not None and progress_tracker.is_completed(keyword, code):
             return []
@@ -84,7 +85,7 @@ class DmfwCollector:
         total = int(first_page.get("total", 0))
 
         if total > self.partition_threshold:
-            children = self.client.list_divisions(code)
+            children = children_override if children_override is not None else self.client.list_divisions(code)
             if children:
                 records: list[DmfwPlaceRecord] = []
                 for child in children:

@@ -130,6 +130,20 @@ def _resolve_dmfw_run_options(args: argparse.Namespace) -> DmfwRunOptions:
     if not chars:
         raise SystemExit("run-dmfw-chars requires --chars or a json config containing 'chars'")
 
+    chars_str = str(chars)
+    chars_path = Path(chars_str)
+    if not chars_path.is_absolute() and args.project_root:
+        resolved_path = Path(args.project_root) / chars_path
+        if resolved_path.exists() and resolved_path.is_file():
+            chars_path = resolved_path
+    if chars_path.exists() and chars_path.is_file():
+        try:
+            import logging
+            logging.getLogger(__name__).info(f"Loading character set from file: {chars_path}")
+        except Exception:
+            pass
+        chars_str = chars_path.read_text(encoding="utf-8")
+
     export_formats = _parse_formats(args.formats) if args.formats else _normalize_export_formats(payload.get("export"))
     province_codes = _normalize_string_list(args.province_codes) if args.province_codes else _normalize_string_list(payload.get("province_codes"))
     match_mode = args.match_mode or str(payload.get("match_mode", "contain"))
@@ -142,7 +156,7 @@ def _resolve_dmfw_run_options(args: argparse.Namespace) -> DmfwRunOptions:
     sync_divisions_first = bool(args.sync_divisions_first or payload.get("sync_divisions_first", False))
 
     return DmfwRunOptions(
-        chars=str(chars),
+        chars=chars_str,
         export_formats=export_formats,
         resume=resume,
         match_mode=match_mode,

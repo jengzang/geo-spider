@@ -102,6 +102,9 @@ class DmfwProgressTracker:
     resume: bool
     _state: dict[str, object] = field(init=False, repr=False, default_factory=dict)
     _completed_set: set[str] = field(init=False, repr=False, default_factory=set)
+    _dirty: bool = field(init=False, repr=False, default=False)
+    _pending_count: int = field(init=False, repr=False, default=0)
+    _write_threshold: int = field(init=False, repr=False, default=1)
 
     def __post_init__(self) -> None:
         if self.resume and self.path.exists():
@@ -114,8 +117,66 @@ class DmfwProgressTracker:
         else:
             self._completed_set = set()
         self._state["completed"] = list(completed) if isinstance(completed, list) else []
+        self._dirty = False
+        self._pending_count = 0
+        self._write_threshold = 1000 if len(self.chars) > 100 else 1
+        if self.resume:
+            self._import_other_progress()
         if not (self.resume and self.path.exists()):
-            self._save()
+            self._dirty = True
+            self.save()
+
+    def _import_other_progress(self) -> None:
+        filename = self.path.name
+        if not filename.startswith("dmfw_chars_"):
+            return
+        name_part = filename.split(".progress.json")[0]
+        parts = name_part.split("_")
+        if len(parts) < 4:
+            return
+        match_mode = parts[-2]
+        province_suffix = parts[-1]
+
+        parent_dir = self.path.parent
+        if not parent_dir.exists():
+            return
+
+        patterns = [
+            f"dmfw_chars_*_{match_mode}_{province_suffix}.progress.json"
+        ]
+        
+        # Legacy progress files (dmfw_chars_村.progress.json) default to contain and all
+        if match_mode == "contain" and province_suffix == "all":
+            patterns.append("dmfw_chars_*.progress.json")
+
+        imported_tokens = set()
+        for pattern in patterns:
+            for other_file in parent_dir.glob(pattern):
+                if other_file.resolve() == self.path.resolve():
+                    continue
+                if pattern == "dmfw_chars_*.progress.json":
+                    other_name_part = other_file.name.split(".progress.json")[0]
+                    other_parts = other_name_part.split("_")
+                    if len(other_parts) >= 4:
+                        continue
+                
+                try:
+                    other_data = json.loads(other_file.read_text(encoding="utf-8"))
+                    other_completed = other_data.get("completed", [])
+                    if isinstance(other_completed, list):
+                        for token in other_completed:
+                            token_str = str(token)
+                            if token_str not in self._completed_set:
+                                imported_tokens.add(token_str)
+                except Exception as e:
+                    logger.warning(f"Failed to import progress from {other_file}: {e}")
+
+        if imported_tokens:
+            self._completed_set.update(imported_tokens)
+            self._state["completed"] = list(self._completed_set)
+            self._dirty = True
+            logger.info(f"Imported {len(imported_tokens)} completed partitions from other progress files.")
+            self.save()
 
     def is_completed(self, keyword: str, code: str) -> bool:
         return f"{keyword}|{code}" in self._completed_set
@@ -124,12 +185,18 @@ class DmfwProgressTracker:
         token = f"{keyword}|{code}"
         if token not in self._completed_set:
             self._completed_set.add(token)
-            self._state["completed"] = list(self._state.get("completed", [])) + [token]
-            self._save()
+            self._state["completed"].append(token)
+            self._dirty = True
+            self._pending_count += 1
+            if self._pending_count >= self._write_threshold:
+                self.save()
 
-    def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self._state, ensure_ascii=False, indent=2), encoding="utf-8")
+    def save(self) -> None:
+        if self._dirty:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(self._state, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._dirty = False
+            self._pending_count = 0
 
 
 def sync_dmfw_divisions(*, settings: Settings) -> dict[str, object]:
@@ -217,10 +284,16 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
 
     for div in province_divisions:
         division_names[div.code] = div.name
+    division_names[""] = "全国"
 
+    unique_count = len(_normalize_chars(options.chars))
+    display_chars = options.chars.replace("\n", " ").replace("\r", " ")
+    display_chars = display_chars[:50] + "..." if len(display_chars) > 50 else display_chars
+    crawl_scope = "指定省份" if options.province_codes else "全国优先"
     logger.info(
-        f"开始抓取地名任务，匹配模式: {options.match_mode}，待处理字符: {options.chars}，"
-        f"待处理省级区划数: {len(province_divisions)}"
+        f"开始抓取地名任务，匹配模式: {options.match_mode}，抓取范围: {crawl_scope}，"
+        f"待处理字符: {display_chars} (共 {unique_count} 个去重汉字)，"
+        f"可用省级区划数: {len(province_divisions)}"
     )
     if options.resume:
         logger.info("已启用断点续传模式 (resume)")
@@ -241,10 +314,15 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
     fetched_total = 0
     deduped: dict[str, DmfwPlaceRecord] = {}
     division_children_cache: dict[str, list[DmfwDivision]] = {}
+    if not options.province_codes:
+        division_children_cache[""] = province_divisions
 
     try:
         for char in _normalize_chars(options.chars):
-            for division in province_divisions:
+            initial_divisions = province_divisions if options.province_codes else [
+                DmfwDivision(code="", name="全国", parent_code="", level="country")
+            ]
+            for division in initial_divisions:
                 for place in _iter_collect_partition(
                     client=client,
                     keyword=char,
@@ -324,11 +402,17 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
                 finished_at=finished_at,
             )
         )
+        # Flush any remaining buffered progress to disk
+        progress.save()
         logger.info(
             f"抓取任务顺利完成。累计抓取地名数: {fetched_total}，"
             f"数据库已保存总数: {persisted_total}，累计写入批次数: {flush_count}"
         )
     except BaseException as exc:
+        try:
+            progress.save()
+        except Exception:
+            pass
         if deduped:
             batch = list(deduped.values())
             if options.write_run_db:
@@ -603,7 +687,10 @@ def _normalize_formats(formats: list[str]) -> list[str]:
 
 
 def _build_progress_filename(chars: str, match_mode: str, province_codes: list[str] | None) -> str:
-    safe_chars = "".join(char for char in chars if char not in {" ", "\n", "\t"})
+    safe_chars = "".join(char for char in chars if char not in {" ", "\n", "\t", ",", "，", "、", ";", "；"})
+    if len(safe_chars) > 32:
+        import hashlib
+        safe_chars = hashlib.md5(safe_chars.encode("utf-8")).hexdigest()
     province_suffix = "all" if not province_codes else "-".join(province_codes)
     return f"dmfw_chars_{safe_chars}_{match_mode}_{province_suffix}.progress.json"
 
