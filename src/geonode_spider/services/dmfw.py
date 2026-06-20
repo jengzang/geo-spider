@@ -444,7 +444,6 @@ def run_dmfw_parallel_tasks(*, settings: Settings, task_options: list[DmfwRunOpt
         raise ValueError("parallel dmfw mode requires at least two task options")
 
     export_formats = _validate_parallel_task_options(settings, task_options)
-    _prime_parallel_division_children(settings, task_options)
 
     total_db_path = _resolve_total_db_path(settings, task_options[0])
     SQLiteTotalPlaceRepository(total_db_path).initialize()
@@ -519,34 +518,6 @@ def _build_dmfw_api_client(settings: Settings) -> DmfwApiClient:
         session=session,
         bypass_env_proxy=settings.dmfw_bypass_env_proxy,
     )
-
-
-def _prime_parallel_division_children(settings: Settings, task_options: list[DmfwRunOptions]) -> None:
-    repository = SQLiteDivisionRepository(settings.sqlite_path)
-    repository.initialize()
-    root_divisions = repository.list_divisions(parent_code="0")
-    if not root_divisions:
-        return
-
-    requested_codes = {
-        code
-        for option in task_options
-        for code in (option.province_codes or [])
-    }
-    target_codes = requested_codes or {division.code for division in root_divisions}
-    missing_codes = [
-        code
-        for code in sorted(target_codes)
-        if not repository.list_divisions(parent_code=code)
-    ]
-    if not missing_codes:
-        return
-
-    client = _build_dmfw_api_client(settings)
-    for code in missing_codes:
-        children = client.list_divisions(code)
-        if children:
-            repository.upsert_divisions(children)
 
 
 def _validate_parallel_task_options(settings: Settings, task_options: list[DmfwRunOptions]) -> list[str]:
