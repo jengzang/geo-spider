@@ -207,24 +207,7 @@ class DmfwProgressTracker:
 def sync_dmfw_divisions(*, settings: Settings) -> dict[str, object]:
     repository = SQLiteDivisionRepository(settings.sqlite_path)
     repository.initialize()
-
-    profile = RequestProfile(
-        timeout=settings.request_timeout,
-        retries=settings.request_retries,
-        sleep_min_seconds=settings.sleep_min_seconds,
-        sleep_max_seconds=settings.sleep_max_seconds,
-        backoff_base_seconds=settings.backoff_base_seconds,
-        use_proxy=settings.proxy_enabled,
-    )
-    session = SpiderSession(
-        profile,
-        proxy_provider=StaticProxyProvider(settings.proxy_pool or []),
-    )
-    client = DmfwApiClient(
-        settings.dmfw_base_url,
-        session=session,
-        bypass_env_proxy=settings.dmfw_bypass_env_proxy,
-    )
+    client = _build_dmfw_api_client(settings)
     divisions = client.list_divisions("0")
     repository.upsert_divisions(divisions)
     return {
@@ -249,23 +232,7 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
     if options.sync_divisions_first:
         sync_dmfw_divisions(settings=settings)
 
-    profile = RequestProfile(
-        timeout=settings.request_timeout,
-        retries=settings.request_retries,
-        sleep_min_seconds=settings.sleep_min_seconds,
-        sleep_max_seconds=settings.sleep_max_seconds,
-        backoff_base_seconds=settings.backoff_base_seconds,
-        use_proxy=settings.proxy_enabled,
-    )
-    session = SpiderSession(
-        profile,
-        proxy_provider=StaticProxyProvider(settings.proxy_pool or []),
-    )
-    client = DmfwApiClient(
-        settings.dmfw_base_url,
-        session=session,
-        bypass_env_proxy=settings.dmfw_bypass_env_proxy,
-    )
+    client = _build_dmfw_api_client(settings)
     province_divisions = division_repository.list_divisions(parent_code="0")
     if not province_divisions:
         province_divisions = client.list_divisions("0")
@@ -321,6 +288,10 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
     division_children_cache: dict[str, list[DmfwDivision]] = {}
     if not options.province_codes:
         division_children_cache[""] = province_divisions
+    for division in province_divisions:
+        cached_children = division_repository.list_divisions(parent_code=division.code)
+        if cached_children:
+            division_children_cache[division.code] = cached_children
 
     try:
         for char in _normalize_chars(options.chars):
@@ -333,6 +304,7 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
                     keyword=char,
                     code=division.code,
                     progress_tracker=progress,
+                    division_repository=division_repository,
                     partition_threshold=settings.dmfw_partition_threshold,
                     page_size=settings.dmfw_page_size,
                     search_type=options.search_type,
@@ -472,7 +444,7 @@ def run_dmfw_parallel_tasks(*, settings: Settings, task_options: list[DmfwRunOpt
         raise ValueError("parallel dmfw mode requires at least two task options")
 
     export_formats = _validate_parallel_task_options(settings, task_options)
-    _ensure_parallel_divisions(settings, force_refresh=any(option.sync_divisions_first for option in task_options))
+    _prime_parallel_division_children(settings, task_options)
 
     total_db_path = _resolve_total_db_path(settings, task_options[0])
     SQLiteTotalPlaceRepository(total_db_path).initialize()
@@ -529,6 +501,54 @@ def _run_dmfw_parallel_task_worker(settings: Settings, options: DmfwRunOptions, 
     return run_dmfw_chars_pipeline(settings=worker_settings, options=worker_options)
 
 
+def _build_dmfw_api_client(settings: Settings) -> DmfwApiClient:
+    profile = RequestProfile(
+        timeout=settings.request_timeout,
+        retries=settings.request_retries,
+        sleep_min_seconds=settings.sleep_min_seconds,
+        sleep_max_seconds=settings.sleep_max_seconds,
+        backoff_base_seconds=settings.backoff_base_seconds,
+        use_proxy=settings.proxy_enabled,
+    )
+    session = SpiderSession(
+        profile,
+        proxy_provider=StaticProxyProvider(settings.proxy_pool or []),
+    )
+    return DmfwApiClient(
+        settings.dmfw_base_url,
+        session=session,
+        bypass_env_proxy=settings.dmfw_bypass_env_proxy,
+    )
+
+
+def _prime_parallel_division_children(settings: Settings, task_options: list[DmfwRunOptions]) -> None:
+    repository = SQLiteDivisionRepository(settings.sqlite_path)
+    repository.initialize()
+    root_divisions = repository.list_divisions(parent_code="0")
+    if not root_divisions:
+        return
+
+    requested_codes = {
+        code
+        for option in task_options
+        for code in (option.province_codes or [])
+    }
+    target_codes = requested_codes or {division.code for division in root_divisions}
+    missing_codes = [
+        code
+        for code in sorted(target_codes)
+        if not repository.list_divisions(parent_code=code)
+    ]
+    if not missing_codes:
+        return
+
+    client = _build_dmfw_api_client(settings)
+    for code in missing_codes:
+        children = client.list_divisions(code)
+        if children:
+            repository.upsert_divisions(children)
+
+
 def _validate_parallel_task_options(settings: Settings, task_options: list[DmfwRunOptions]) -> list[str]:
     export_formats = _normalize_formats(task_options[0].export_formats or ["db"])
     total_db_path = _resolve_total_db_path(settings, task_options[0])
@@ -540,15 +560,6 @@ def _validate_parallel_task_options(settings: Settings, task_options: list[DmfwR
         if _resolve_total_db_path(settings, option) != total_db_path:
             raise ValueError("parallel dmfw tasks must use the same total_db_path")
     return export_formats
-
-
-def _ensure_parallel_divisions(settings: Settings, *, force_refresh: bool = False) -> None:
-    repository = SQLiteDivisionRepository(settings.sqlite_path)
-    repository.initialize()
-    if force_refresh or not repository.list_divisions(parent_code="0"):
-        sync_dmfw_divisions(settings=settings)
-
-
 def _resolve_total_db_path(settings: Settings, options: DmfwRunOptions) -> Path:
     if options.total_db_path:
         return Path(options.total_db_path)
@@ -611,6 +622,7 @@ def _iter_collect_partition(
     keyword: str,
     code: str,
     progress_tracker: DmfwProgressTracker,
+    division_repository: SQLiteDivisionRepository,
     partition_threshold: int,
     page_size: int,
     search_type: str,
@@ -639,7 +651,11 @@ def _iter_collect_partition(
         if code in division_children_cache:
             children = division_children_cache[code]
         else:
-            children = client.list_divisions(code)
+            children = division_repository.list_divisions(parent_code=code)
+            if not children:
+                children = client.list_divisions(code)
+                if children:
+                    division_repository.upsert_divisions(children)
             division_children_cache[code] = children
         if children:
             logger.info(f"区划 {name} ({code}) 的总数 {total} 超过阈值 {partition_threshold}，开始细分下级区划抓取...")
@@ -651,6 +667,7 @@ def _iter_collect_partition(
                     keyword=keyword,
                     code=child.code,
                     progress_tracker=progress_tracker,
+                    division_repository=division_repository,
                     partition_threshold=partition_threshold,
                     page_size=page_size,
                     search_type=search_type,
