@@ -7,7 +7,7 @@ from typing import Any, Sequence
 
 from geonode_spider.config.settings import load_settings
 from geonode_spider.services.bootstrap import ensure_runtime_directories, export_from_database, run_sample_pipeline
-from geonode_spider.services.dmfw import DmfwRunOptions, run_dmfw_chars_pipeline, sync_dmfw_divisions
+from geonode_spider.services.dmfw import DmfwRunOptions, run_dmfw_chars_pipeline, run_dmfw_parallel_tasks, sync_dmfw_divisions
 from geonode_spider.storage.sqlite import SQLiteRegionRepository
 from geonode_spider.utils.logging import setup_logging
 
@@ -40,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     dmfw_parser = subparsers.add_parser("run-dmfw-chars", help="Run dmfw collection for a character set.")
     dmfw_parser.add_argument("--chars", default=None, help="Character set used for searches.")
-    dmfw_parser.add_argument("--json", dest="json_path", default=None, help="Path to dmfw task json config.")
+    dmfw_parser.add_argument("--json", dest="json_paths", action="append", default=None, help="Path to dmfw task json config. Repeat to submit multiple task files.")
     dmfw_parser.add_argument("--export", dest="formats", default=None, help="Comma-separated formats or 'all'.")
     dmfw_parser.add_argument("--resume", action="store_true", help="Resume from the saved dmfw partition progress file.")
     dmfw_parser.add_argument("--match-mode", choices=sorted(MATCH_MODE_TO_SEARCH_TYPE), default=None, help="Search mode: contain/exact.")
@@ -51,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     dmfw_parser.add_argument("--no-write-run-db", action="store_true", help="Do not persist this run into the default run database.")
     dmfw_parser.add_argument("--write-total-db", action="store_true", help="Append/upsert records into a cumulative total database.")
     dmfw_parser.add_argument("--total-db-path", default=None, help="Optional custom path for the cumulative total database.")
+    dmfw_parser.add_argument("--workers", type=int, default=1, help="Parallel worker count for multi-json task mode.")
 
     subparsers.add_parser("sync-dmfw-divisions", help="Fetch and cache dmfw province divisions into SQLite.")
 
@@ -109,8 +110,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "run-dmfw-chars":
-        options = _resolve_dmfw_run_options(args)
-        result = run_dmfw_chars_pipeline(settings=settings, options=options)
+        if _is_parallel_dmfw_task_mode(args):
+            task_options = _resolve_dmfw_parallel_task_options(args)
+            result = run_dmfw_parallel_tasks(settings=settings, task_options=task_options, workers=args.workers)
+        else:
+            options = _resolve_dmfw_run_options(args)
+            result = run_dmfw_chars_pipeline(settings=settings, options=options)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
@@ -124,7 +129,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _resolve_dmfw_run_options(args: argparse.Namespace) -> DmfwRunOptions:
-    payload = _load_dmfw_task_json(args.json_path)
+    json_path = _first_json_path(args)
+    payload = _load_dmfw_task_json(json_path)
 
     chars = args.chars or payload.get("chars")
     if not chars:
@@ -165,11 +171,39 @@ def _resolve_dmfw_run_options(args: argparse.Namespace) -> DmfwRunOptions:
         flush_batch_size=flush_batch_size,
         max_runtime_seconds=max_runtime_seconds,
         sync_divisions_first=sync_divisions_first,
-        json_path=str(args.json_path) if args.json_path else None,
+        json_path=str(json_path) if json_path else None,
         write_run_db=not bool(args.no_write_run_db or payload.get("no_write_run_db", False)),
         write_total_db=bool(args.write_total_db or payload.get("write_total_db", False)),
         total_db_path=str(args.total_db_path or payload.get("total_db_path")) if (args.total_db_path or payload.get("total_db_path")) else None,
     )
+
+
+def _resolve_dmfw_parallel_task_options(args: argparse.Namespace) -> list[DmfwRunOptions]:
+    json_paths = list(args.json_paths or [])
+    options: list[DmfwRunOptions] = []
+    for json_path in json_paths:
+        task_args = argparse.Namespace(**vars(args))
+        task_args.json_paths = [json_path]
+        options.append(_resolve_dmfw_run_options(task_args))
+    return options
+
+
+def _is_parallel_dmfw_task_mode(args: argparse.Namespace) -> bool:
+    json_paths = list(args.json_paths or [])
+    if len(json_paths) > 1:
+        if args.chars:
+            raise SystemExit("parallel dmfw task mode does not accept --chars; use task json files only")
+        return True
+    if int(args.workers or 1) > 1:
+        raise SystemExit("run-dmfw-chars --workers requires at least two --json task files")
+    return False
+
+
+def _first_json_path(args: argparse.Namespace) -> str | None:
+    json_paths = list(args.json_paths or [])
+    if not json_paths:
+        return None
+    return str(json_paths[0])
 
 
 def _load_dmfw_task_json(json_path: str | None) -> dict[str, Any]:

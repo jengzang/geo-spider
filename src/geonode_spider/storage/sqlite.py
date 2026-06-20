@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
+from typing import Callable, TypeVar
 
 from geonode_spider.models.place import DmfwDivision, DmfwPlaceRecord
 from geonode_spider.models.region import CrawlRunRecord, RegionNode
+
+
+SQLITE_TIMEOUT_SECONDS = 30.0
+SQLITE_BUSY_TIMEOUT_MS = 30000
+SQLITE_LOCK_RETRY_ATTEMPTS = 8
+SQLITE_LOCK_RETRY_DELAY_SECONDS = 0.25
+T = TypeVar("T")
 
 
 CREATE_REGIONS_TABLE = """
@@ -130,7 +139,33 @@ def _configure_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA temp_store=MEMORY")
+    conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
     return conn
+
+
+def _is_locked_error(exc: sqlite3.OperationalError) -> bool:
+    message = str(exc).lower()
+    return "database is locked" in message or "database table is locked" in message
+
+
+def _run_with_locked_retry(
+    operation: Callable[[], T],
+    *,
+    attempts: int = SQLITE_LOCK_RETRY_ATTEMPTS,
+    delay_seconds: float = SQLITE_LOCK_RETRY_DELAY_SECONDS,
+) -> T:
+    last_error: sqlite3.OperationalError | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return operation()
+        except sqlite3.OperationalError as exc:
+            if not _is_locked_error(exc) or attempt >= attempts:
+                raise
+            last_error = exc
+            time.sleep(delay_seconds)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("unreachable retry state")
 
 
 class SQLiteDivisionRepository:
@@ -139,36 +174,42 @@ class SQLiteDivisionRepository:
 
     def initialize(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            conn.execute(CREATE_CRAWL_RUNS_TABLE)
-            conn.execute(CREATE_DMFW_DIVISIONS_TABLE)
-            conn.execute(CREATE_DMFW_PLACES_TABLE)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_dmfw_divisions_parent_code ON dmfw_divisions(parent_code)")
-            _ensure_dmfw_place_columns(conn)
-            conn.commit()
+        def _write() -> None:
+            with self._connect() as conn:
+                conn.execute(CREATE_CRAWL_RUNS_TABLE)
+                conn.execute(CREATE_DMFW_DIVISIONS_TABLE)
+                conn.execute(CREATE_DMFW_PLACES_TABLE)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_dmfw_divisions_parent_code ON dmfw_divisions(parent_code)")
+                _ensure_dmfw_place_columns(conn)
+                conn.commit()
+
+        _run_with_locked_retry(_write)
 
     def upsert_divisions(self, divisions: Iterable[DmfwDivision]) -> None:
         rows = [division.to_dict() for division in divisions]
         if not rows:
             return
-        with self._connect() as conn:
-            conn.executemany(
-                """
-                INSERT INTO dmfw_divisions (
-                    code, name, parent_code, level, source_name, captured_at, updated_at
-                ) VALUES (
-                    :code, :name, :parent_code, :level, :source_name, :captured_at, :updated_at
+        def _write() -> None:
+            with self._connect() as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO dmfw_divisions (
+                        code, name, parent_code, level, source_name, captured_at, updated_at
+                    ) VALUES (
+                        :code, :name, :parent_code, :level, :source_name, :captured_at, :updated_at
+                    )
+                    ON CONFLICT(code) DO UPDATE SET
+                        name = excluded.name,
+                        parent_code = excluded.parent_code,
+                        level = excluded.level,
+                        source_name = excluded.source_name,
+                        updated_at = excluded.updated_at
+                    """,
+                    rows,
                 )
-                ON CONFLICT(code) DO UPDATE SET
-                    name = excluded.name,
-                    parent_code = excluded.parent_code,
-                    level = excluded.level,
-                    source_name = excluded.source_name,
-                    updated_at = excluded.updated_at
-                """,
-                rows,
-            )
-            conn.commit()
+                conn.commit()
+
+        _run_with_locked_retry(_write)
 
     def list_divisions(self, *, parent_code: str = "0") -> list[DmfwDivision]:
         query = "SELECT code, name, parent_code, level, source_name, captured_at, updated_at FROM dmfw_divisions WHERE parent_code = ? ORDER BY code"
@@ -177,7 +218,7 @@ class SQLiteDivisionRepository:
         return [DmfwDivision(**dict(row)) for row in rows]
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=SQLITE_TIMEOUT_SECONDS)
         return _configure_connection(conn)
 
 
@@ -187,48 +228,54 @@ class SQLiteRegionRepository:
 
     def initialize(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            conn.execute(CREATE_REGIONS_TABLE)
-            conn.execute(CREATE_CRAWL_RUNS_TABLE)
-            conn.execute(CREATE_DMFW_PLACES_TABLE)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_regions_level ON regions(level)")
-            _ensure_dmfw_place_columns(conn)
-            conn.commit()
+        def _write() -> None:
+            with self._connect() as conn:
+                conn.execute(CREATE_REGIONS_TABLE)
+                conn.execute(CREATE_CRAWL_RUNS_TABLE)
+                conn.execute(CREATE_DMFW_PLACES_TABLE)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_regions_level ON regions(level)")
+                _ensure_dmfw_place_columns(conn)
+                conn.commit()
+
+        _run_with_locked_retry(_write)
 
     def upsert_regions(self, regions: Iterable[RegionNode]) -> None:
         rows = [region.to_dict() for region in regions]
         if not rows:
             return
-        with self._connect() as conn:
-            conn.executemany(
-                """
-                INSERT INTO regions (
-                    code, name, full_name, level, parent_code, province_code,
-                    city_code, district_code, town_code, longitude, latitude,
-                    source_name, source_url, version, captured_at, updated_at
-                ) VALUES (
-                    :code, :name, :full_name, :level, :parent_code, :province_code,
-                    :city_code, :district_code, :town_code, :longitude, :latitude,
-                    :source_name, :source_url, :version, :captured_at, :updated_at
+        def _write() -> None:
+            with self._connect() as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO regions (
+                        code, name, full_name, level, parent_code, province_code,
+                        city_code, district_code, town_code, longitude, latitude,
+                        source_name, source_url, version, captured_at, updated_at
+                    ) VALUES (
+                        :code, :name, :full_name, :level, :parent_code, :province_code,
+                        :city_code, :district_code, :town_code, :longitude, :latitude,
+                        :source_name, :source_url, :version, :captured_at, :updated_at
+                    )
+                    ON CONFLICT(code, version) DO UPDATE SET
+                        name = excluded.name,
+                        full_name = excluded.full_name,
+                        level = excluded.level,
+                        parent_code = excluded.parent_code,
+                        province_code = excluded.province_code,
+                        city_code = excluded.city_code,
+                        district_code = excluded.district_code,
+                        town_code = excluded.town_code,
+                        longitude = excluded.longitude,
+                        latitude = excluded.latitude,
+                        source_name = excluded.source_name,
+                        source_url = excluded.source_url,
+                        updated_at = excluded.updated_at
+                    """,
+                    rows,
                 )
-                ON CONFLICT(code, version) DO UPDATE SET
-                    name = excluded.name,
-                    full_name = excluded.full_name,
-                    level = excluded.level,
-                    parent_code = excluded.parent_code,
-                    province_code = excluded.province_code,
-                    city_code = excluded.city_code,
-                    district_code = excluded.district_code,
-                    town_code = excluded.town_code,
-                    longitude = excluded.longitude,
-                    latitude = excluded.latitude,
-                    source_name = excluded.source_name,
-                    source_url = excluded.source_url,
-                    updated_at = excluded.updated_at
-                """,
-                rows,
-            )
-            conn.commit()
+                conn.commit()
+
+        _run_with_locked_retry(_write)
 
     def list_regions(self, *, level: str | None = None) -> list[RegionNode]:
         query = "SELECT * FROM regions"
@@ -242,32 +289,35 @@ class SQLiteRegionRepository:
         return [RegionNode.from_row(dict(row)) for row in rows]
 
     def record_crawl_run(self, record: CrawlRunRecord) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO crawl_runs (
-                    run_id, source_name, status, item_count, started_at, finished_at, error_message
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(run_id) DO UPDATE SET
-                    status = excluded.status,
-                    item_count = excluded.item_count,
-                    finished_at = excluded.finished_at,
-                    error_message = excluded.error_message
-                """,
-                (
-                    record.run_id,
-                    record.source_name,
-                    record.status,
-                    record.item_count,
-                    record.started_at,
-                    record.finished_at,
-                    record.error_message,
-                ),
-            )
-            conn.commit()
+        def _write() -> None:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO crawl_runs (
+                        run_id, source_name, status, item_count, started_at, finished_at, error_message
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(run_id) DO UPDATE SET
+                        status = excluded.status,
+                        item_count = excluded.item_count,
+                        finished_at = excluded.finished_at,
+                        error_message = excluded.error_message
+                    """,
+                    (
+                        record.run_id,
+                        record.source_name,
+                        record.status,
+                        record.item_count,
+                        record.started_at,
+                        record.finished_at,
+                        record.error_message,
+                    ),
+                )
+                conn.commit()
+
+        _run_with_locked_retry(_write)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=SQLITE_TIMEOUT_SECONDS)
         return _configure_connection(conn)
 
 
@@ -277,59 +327,65 @@ class SQLitePlaceRepository:
 
     def initialize(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            conn.execute(CREATE_DMFW_PLACES_TABLE)
-            conn.execute(CREATE_CRAWL_RUNS_TABLE)
-            _ensure_dmfw_place_columns(conn)
-            conn.commit()
+        def _write() -> None:
+            with self._connect() as conn:
+                conn.execute(CREATE_DMFW_PLACES_TABLE)
+                conn.execute(CREATE_CRAWL_RUNS_TABLE)
+                _ensure_dmfw_place_columns(conn)
+                conn.commit()
+
+        _run_with_locked_retry(_write)
 
     def upsert_places(self, places: Iterable[DmfwPlaceRecord]) -> None:
         rows = [place.to_dict() for place in places]
         if not rows:
             return
-        with self._connect() as conn:
-            conn.executemany(
-                """
-                INSERT INTO dmfw_places (
-                    source_id, place_code, standard_name, place_type, place_type_code,
-                    province_name, city_name, area_name, area_code, longitude, latitude,
-                    keyword, partition_code, source_url, source_name,
-                    roman_alphabet_spelling, ethnic_minorities_writing, raw_payload_json,
-                    geometry_type, coordinates_json, match_mode, fetched_at_utc, captured_at, updated_at
-                ) VALUES (
-                    :source_id, :place_code, :standard_name, :place_type, :place_type_code,
-                    :province_name, :city_name, :area_name, :area_code, :longitude, :latitude,
-                    :keyword, :partition_code, :source_url, :source_name,
-                    :roman_alphabet_spelling, :ethnic_minorities_writing, :raw_payload_json,
-                    :geometry_type, :coordinates_json, :match_mode, :fetched_at_utc, :captured_at, :updated_at
+        def _write() -> None:
+            with self._connect() as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO dmfw_places (
+                        source_id, place_code, standard_name, place_type, place_type_code,
+                        province_name, city_name, area_name, area_code, longitude, latitude,
+                        keyword, partition_code, source_url, source_name,
+                        roman_alphabet_spelling, ethnic_minorities_writing, raw_payload_json,
+                        geometry_type, coordinates_json, match_mode, fetched_at_utc, captured_at, updated_at
+                    ) VALUES (
+                        :source_id, :place_code, :standard_name, :place_type, :place_type_code,
+                        :province_name, :city_name, :area_name, :area_code, :longitude, :latitude,
+                        :keyword, :partition_code, :source_url, :source_name,
+                        :roman_alphabet_spelling, :ethnic_minorities_writing, :raw_payload_json,
+                        :geometry_type, :coordinates_json, :match_mode, :fetched_at_utc, :captured_at, :updated_at
+                    )
+                    ON CONFLICT(source_id) DO UPDATE SET
+                        place_code = excluded.place_code,
+                        standard_name = excluded.standard_name,
+                        place_type = excluded.place_type,
+                        place_type_code = excluded.place_type_code,
+                        province_name = excluded.province_name,
+                        city_name = excluded.city_name,
+                        area_name = excluded.area_name,
+                        area_code = excluded.area_code,
+                        longitude = excluded.longitude,
+                        latitude = excluded.latitude,
+                        keyword = excluded.keyword,
+                        partition_code = excluded.partition_code,
+                        source_url = excluded.source_url,
+                        source_name = excluded.source_name,
+                        roman_alphabet_spelling = excluded.roman_alphabet_spelling,
+                        ethnic_minorities_writing = excluded.ethnic_minorities_writing,
+                        raw_payload_json = excluded.raw_payload_json,
+                        geometry_type = excluded.geometry_type,
+                        coordinates_json = excluded.coordinates_json,
+                        match_mode = excluded.match_mode,
+                        fetched_at_utc = excluded.fetched_at_utc,
+                        updated_at = excluded.updated_at
+                    """,
+                    rows,
                 )
-                ON CONFLICT(source_id) DO UPDATE SET
-                    place_code = excluded.place_code,
-                    standard_name = excluded.standard_name,
-                    place_type = excluded.place_type,
-                    place_type_code = excluded.place_type_code,
-                    province_name = excluded.province_name,
-                    city_name = excluded.city_name,
-                    area_name = excluded.area_name,
-                    area_code = excluded.area_code,
-                    longitude = excluded.longitude,
-                    latitude = excluded.latitude,
-                    keyword = excluded.keyword,
-                    partition_code = excluded.partition_code,
-                    source_url = excluded.source_url,
-                    source_name = excluded.source_name,
-                    roman_alphabet_spelling = excluded.roman_alphabet_spelling,
-                    ethnic_minorities_writing = excluded.ethnic_minorities_writing,
-                    raw_payload_json = excluded.raw_payload_json,
-                    geometry_type = excluded.geometry_type,
-                    coordinates_json = excluded.coordinates_json,
-                    match_mode = excluded.match_mode,
-                    fetched_at_utc = excluded.fetched_at_utc,
-                    updated_at = excluded.updated_at
-                """,
-                rows,
-            )
-            conn.commit()
+                conn.commit()
+
+        _run_with_locked_retry(_write)
 
     def list_places(self) -> list[DmfwPlaceRecord]:
         query = """
@@ -346,32 +402,35 @@ class SQLitePlaceRepository:
         return int(row[0])
 
     def record_crawl_run(self, record: CrawlRunRecord) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO crawl_runs (
-                    run_id, source_name, status, item_count, started_at, finished_at, error_message
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(run_id) DO UPDATE SET
-                    status = excluded.status,
-                    item_count = excluded.item_count,
-                    finished_at = excluded.finished_at,
-                    error_message = excluded.error_message
-                """,
-                (
-                    record.run_id,
-                    record.source_name,
-                    record.status,
-                    record.item_count,
-                    record.started_at,
-                    record.finished_at,
-                    record.error_message,
-                ),
-            )
-            conn.commit()
+        def _write() -> None:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO crawl_runs (
+                        run_id, source_name, status, item_count, started_at, finished_at, error_message
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(run_id) DO UPDATE SET
+                        status = excluded.status,
+                        item_count = excluded.item_count,
+                        finished_at = excluded.finished_at,
+                        error_message = excluded.error_message
+                    """,
+                    (
+                        record.run_id,
+                        record.source_name,
+                        record.status,
+                        record.item_count,
+                        record.started_at,
+                        record.finished_at,
+                        record.error_message,
+                    ),
+                )
+                conn.commit()
+
+        _run_with_locked_retry(_write)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=SQLITE_TIMEOUT_SECONDS)
         return _configure_connection(conn)
 
 
@@ -381,71 +440,77 @@ class SQLiteTotalPlaceRepository:
 
     def initialize(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            conn.execute(CREATE_DMFW_TOTAL_SINGLE_PLACES_TABLE)
-            conn.execute(CREATE_DMFW_TOTAL_MULTI_PLACES_TABLE)
-            conn.execute(CREATE_CRAWL_RUNS_TABLE)
-            conn.commit()
+        def _write() -> None:
+            with self._connect() as conn:
+                conn.execute(CREATE_DMFW_TOTAL_SINGLE_PLACES_TABLE)
+                conn.execute(CREATE_DMFW_TOTAL_MULTI_PLACES_TABLE)
+                conn.execute(CREATE_CRAWL_RUNS_TABLE)
+                conn.commit()
+
+        _run_with_locked_retry(_write)
 
     def upsert_places(self, places: Iterable[DmfwPlaceRecord]) -> None:
         single_rows = [place.to_total_single_dict() for place in places if place.has_single_coordinate()]
         multi_rows = [place.to_total_multi_dict() for place in places if place.has_multi_coordinates()]
-        with self._connect() as conn:
-            if single_rows:
-                conn.executemany(
-                    """
-                    INSERT INTO dmfw_places_single (
-                        source_id, place_code, standard_name, place_type, place_type_code,
-                        province_name, city_name, area_name, area_code, longitude, latitude,
-                        captured_at, updated_at
-                    ) VALUES (
-                        :source_id, :place_code, :standard_name, :place_type, :place_type_code,
-                        :province_name, :city_name, :area_name, :area_code, :longitude, :latitude,
-                        :captured_at, :updated_at
+        def _write() -> None:
+            with self._connect() as conn:
+                if single_rows:
+                    conn.executemany(
+                        """
+                        INSERT INTO dmfw_places_single (
+                            source_id, place_code, standard_name, place_type, place_type_code,
+                            province_name, city_name, area_name, area_code, longitude, latitude,
+                            captured_at, updated_at
+                        ) VALUES (
+                            :source_id, :place_code, :standard_name, :place_type, :place_type_code,
+                            :province_name, :city_name, :area_name, :area_code, :longitude, :latitude,
+                            :captured_at, :updated_at
+                        )
+                        ON CONFLICT(source_id) DO UPDATE SET
+                            place_code = excluded.place_code,
+                            standard_name = excluded.standard_name,
+                            place_type = excluded.place_type,
+                            place_type_code = excluded.place_type_code,
+                            province_name = excluded.province_name,
+                            city_name = excluded.city_name,
+                            area_name = excluded.area_name,
+                            area_code = excluded.area_code,
+                            longitude = excluded.longitude,
+                            latitude = excluded.latitude,
+                            updated_at = excluded.updated_at
+                        """,
+                        single_rows,
                     )
-                    ON CONFLICT(source_id) DO UPDATE SET
-                        place_code = excluded.place_code,
-                        standard_name = excluded.standard_name,
-                        place_type = excluded.place_type,
-                        place_type_code = excluded.place_type_code,
-                        province_name = excluded.province_name,
-                        city_name = excluded.city_name,
-                        area_name = excluded.area_name,
-                        area_code = excluded.area_code,
-                        longitude = excluded.longitude,
-                        latitude = excluded.latitude,
-                        updated_at = excluded.updated_at
-                    """,
-                    single_rows,
-                )
-            if multi_rows:
-                conn.executemany(
-                    """
-                    INSERT INTO dmfw_places_multi (
-                        source_id, place_code, standard_name, place_type, place_type_code,
-                        province_name, city_name, area_name, area_code, geometry_type, coordinates_json,
-                        captured_at, updated_at
-                    ) VALUES (
-                        :source_id, :place_code, :standard_name, :place_type, :place_type_code,
-                        :province_name, :city_name, :area_name, :area_code, :geometry_type, :coordinates_json,
-                        :captured_at, :updated_at
+                if multi_rows:
+                    conn.executemany(
+                        """
+                        INSERT INTO dmfw_places_multi (
+                            source_id, place_code, standard_name, place_type, place_type_code,
+                            province_name, city_name, area_name, area_code, geometry_type, coordinates_json,
+                            captured_at, updated_at
+                        ) VALUES (
+                            :source_id, :place_code, :standard_name, :place_type, :place_type_code,
+                            :province_name, :city_name, :area_name, :area_code, :geometry_type, :coordinates_json,
+                            :captured_at, :updated_at
+                        )
+                        ON CONFLICT(source_id) DO UPDATE SET
+                            place_code = excluded.place_code,
+                            standard_name = excluded.standard_name,
+                            place_type = excluded.place_type,
+                            place_type_code = excluded.place_type_code,
+                            province_name = excluded.province_name,
+                            city_name = excluded.city_name,
+                            area_name = excluded.area_name,
+                            area_code = excluded.area_code,
+                            geometry_type = excluded.geometry_type,
+                            coordinates_json = excluded.coordinates_json,
+                            updated_at = excluded.updated_at
+                        """,
+                        multi_rows,
                     )
-                    ON CONFLICT(source_id) DO UPDATE SET
-                        place_code = excluded.place_code,
-                        standard_name = excluded.standard_name,
-                        place_type = excluded.place_type,
-                        place_type_code = excluded.place_type_code,
-                        province_name = excluded.province_name,
-                        city_name = excluded.city_name,
-                        area_name = excluded.area_name,
-                        area_code = excluded.area_code,
-                        geometry_type = excluded.geometry_type,
-                        coordinates_json = excluded.coordinates_json,
-                        updated_at = excluded.updated_at
-                    """,
-                    multi_rows,
-                )
-            conn.commit()
+                conn.commit()
+
+        _run_with_locked_retry(_write)
 
     def list_places(self) -> list[DmfwPlaceRecord]:
         with self._connect() as conn:
@@ -485,7 +550,7 @@ class SQLiteTotalPlaceRepository:
         return int(row[0])
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=SQLITE_TIMEOUT_SECONDS)
         return _configure_connection(conn)
 
 

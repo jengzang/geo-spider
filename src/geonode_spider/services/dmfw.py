@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 import logging
 import shutil
 import sqlite3
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,9 @@ from geonode_spider.models.region import CrawlRunRecord, utc_now_iso
 from geonode_spider.storage.sqlite import SQLiteDivisionRepository, SQLitePlaceRepository, SQLiteTotalPlaceRepository
 
 
+MAX_PARALLEL_DMFW_WORKERS = 4
+
+
 @dataclass(slots=True)
 class DmfwRunOptions:
     chars: str
@@ -39,6 +43,7 @@ class DmfwRunOptions:
     write_run_db: bool = True
     write_total_db: bool = False
     total_db_path: str | None = None
+    skip_export: bool = False
 
 
 class DmfwApiClient:
@@ -385,23 +390,28 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
             stored_places = []
             place_count = 0
 
-        exported = export_dmfw_places(
-            records=stored_places,
-            export_dir=settings.export_dir,
-            sqlite_path=sqlite_export_path,
-            formats=requested_formats,
-        )
-        finished_at = datetime.now(UTC).isoformat()
-        repository.record_crawl_run(
-            CrawlRunRecord(
-                run_id=run_id,
-                source_name="dmfw",
-                status="success",
-                item_count=place_count,
-                started_at=started_at,
-                finished_at=finished_at,
+        exported = (
+            {}
+            if options.skip_export
+            else export_dmfw_places(
+                records=stored_places,
+                export_dir=settings.export_dir,
+                sqlite_path=sqlite_export_path,
+                formats=requested_formats,
             )
         )
+        finished_at = datetime.now(UTC).isoformat()
+        if options.write_run_db:
+            repository.record_crawl_run(
+                CrawlRunRecord(
+                    run_id=run_id,
+                    source_name="dmfw",
+                    status="success",
+                    item_count=place_count,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                )
+            )
         # Flush any remaining buffered progress to disk
         progress.save()
         logger.info(
@@ -426,17 +436,18 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
             )
             deduped.clear()
         finished_at = datetime.now(UTC).isoformat()
-        repository.record_crawl_run(
-            CrawlRunRecord(
-                run_id=run_id,
-                source_name="dmfw",
-                status="failed",
-                item_count=repository.count_places(),
-                started_at=started_at,
-                finished_at=finished_at,
-                error_message=str(exc),
+        if options.write_run_db:
+            repository.record_crawl_run(
+                CrawlRunRecord(
+                    run_id=run_id,
+                    source_name="dmfw",
+                    status="failed",
+                    item_count=repository.count_places(),
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    error_message=str(exc),
+                )
             )
-        )
         logger.error(f"抓取任务遇到异常中断: {exc}", exc_info=True)
         raise
 
@@ -454,6 +465,104 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
         "write_total_db": options.write_total_db,
         "total_db_path": str(total_db_path) if total_db_path is not None else None,
     }
+
+
+def run_dmfw_parallel_tasks(*, settings: Settings, task_options: list[DmfwRunOptions], workers: int) -> dict[str, object]:
+    if len(task_options) < 2:
+        raise ValueError("parallel dmfw mode requires at least two task options")
+
+    export_formats = _validate_parallel_task_options(settings, task_options)
+    _ensure_parallel_divisions(settings, force_refresh=any(option.sync_divisions_first for option in task_options))
+
+    total_db_path = _resolve_total_db_path(settings, task_options[0])
+    SQLiteTotalPlaceRepository(total_db_path).initialize()
+
+    effective_workers = min(max(1, workers), len(task_options), MAX_PARALLEL_DMFW_WORKERS)
+    future_map: dict[object, DmfwRunOptions] = {}
+    results: list[dict[str, object]] = []
+
+    with ProcessPoolExecutor(max_workers=effective_workers) as executor:
+        for option in task_options:
+            future = executor.submit(
+                _run_dmfw_parallel_task_worker,
+                settings,
+                option,
+                _build_task_namespace(option),
+            )
+            future_map[future] = option
+        for future in as_completed(list(future_map)):
+            results.append(future.result())
+
+    total_repository = SQLiteTotalPlaceRepository(total_db_path)
+    total_repository.initialize()
+    persisted_total = total_repository.count_places()
+    db_only_export = set(export_formats) == {"db"}
+    stored_places = [] if db_only_export else total_repository.list_places()
+    exported = export_dmfw_places(
+        records=stored_places,
+        export_dir=settings.export_dir,
+        sqlite_path=total_db_path,
+        formats=export_formats,
+    )
+
+    return {
+        "mode": "parallel",
+        "task_count": len(task_options),
+        "workers": effective_workers,
+        "max_supported_workers": MAX_PARALLEL_DMFW_WORKERS,
+        "place_count": persisted_total if db_only_export else len(stored_places),
+        "persisted_count": persisted_total,
+        "total_db_path": str(total_db_path),
+        "exported_files": exported,
+        "tasks": sorted(results, key=lambda item: str(item.get("task_json") or "")),
+    }
+
+
+def _run_dmfw_parallel_task_worker(settings: Settings, options: DmfwRunOptions, task_namespace: str) -> dict[str, object]:
+    worker_settings = replace(settings, raw_dir=settings.raw_dir / task_namespace)
+    worker_options = replace(
+        options,
+        write_run_db=False,
+        skip_export=True,
+        sync_divisions_first=False,
+    )
+    return run_dmfw_chars_pipeline(settings=worker_settings, options=worker_options)
+
+
+def _validate_parallel_task_options(settings: Settings, task_options: list[DmfwRunOptions]) -> list[str]:
+    export_formats = _normalize_formats(task_options[0].export_formats or ["db"])
+    total_db_path = _resolve_total_db_path(settings, task_options[0])
+    for option in task_options:
+        if not option.write_total_db:
+            raise ValueError("parallel dmfw tasks require write_total_db=True for every task")
+        if _normalize_formats(option.export_formats or ["db"]) != export_formats:
+            raise ValueError("parallel dmfw tasks must use the same export formats")
+        if _resolve_total_db_path(settings, option) != total_db_path:
+            raise ValueError("parallel dmfw tasks must use the same total_db_path")
+    return export_formats
+
+
+def _ensure_parallel_divisions(settings: Settings, *, force_refresh: bool = False) -> None:
+    repository = SQLiteDivisionRepository(settings.sqlite_path)
+    repository.initialize()
+    if force_refresh or not repository.list_divisions(parent_code="0"):
+        sync_dmfw_divisions(settings=settings)
+
+
+def _resolve_total_db_path(settings: Settings, options: DmfwRunOptions) -> Path:
+    if options.total_db_path:
+        return Path(options.total_db_path)
+    return settings.processed_dir / "dmfw_places_total.db"
+
+
+def _build_task_namespace(options: DmfwRunOptions) -> str:
+    if options.json_path:
+        stem = Path(options.json_path).stem.strip()
+        safe = "".join(char if char.isalnum() or char in {"-", "_"} else "-" for char in stem)
+        safe = safe.strip("-_")
+        if safe:
+            return safe
+    return f"task-{abs(hash((options.chars, options.match_mode, tuple(options.province_codes or []))))}"
 
 
 def export_dmfw_places(
