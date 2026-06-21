@@ -52,7 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
     dmfw_parser.add_argument("--write-total-db", action="store_true", help="Append/upsert records into a cumulative total database.")
     dmfw_parser.add_argument("--total-db-path", default=None, help="Optional custom path for the cumulative total database.")
 
-    subparsers.add_parser("sync-dmfw-divisions", help="Fetch and cache dmfw province divisions into SQLite.")
+    subparsers.add_parser("sync-dmfw-divisions", help="Fetch and cache the dmfw division tree into SQLite.")
 
     return parser
 
