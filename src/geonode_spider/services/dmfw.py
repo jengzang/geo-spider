@@ -222,6 +222,7 @@ def sync_dmfw_divisions(*, settings: Settings) -> dict[str, object]:
     )
     divisions = client.list_divisions("0")
     repository.upsert_divisions(divisions)
+    repository.mark_division_children_fetched("0")
     return {
         "source_name": "dmfw",
         "division_count": len(divisions),
@@ -263,8 +264,7 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
     )
     province_divisions = division_repository.list_divisions(parent_code="0")
     if not province_divisions:
-        province_divisions = client.list_divisions("0")
-        division_repository.upsert_divisions(province_divisions)
+        province_divisions = _get_or_fetch_divisions(client=client, division_repository=division_repository, code="0")
     if options.province_codes:
         allowed = set(options.province_codes)
         province_divisions = [division for division in province_divisions if division.code in allowed]
@@ -328,6 +328,7 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
                     keyword=char,
                     code=division.code,
                     progress_tracker=progress,
+                    division_repository=division_repository,
                     partition_threshold=settings.dmfw_partition_threshold,
                     page_size=settings.dmfw_page_size,
                     search_type=options.search_type,
@@ -392,16 +393,17 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
             formats=requested_formats,
         )
         finished_at = datetime.now(UTC).isoformat()
-        repository.record_crawl_run(
-            CrawlRunRecord(
-                run_id=run_id,
-                source_name="dmfw",
-                status="success",
-                item_count=place_count,
-                started_at=started_at,
-                finished_at=finished_at,
+        if options.write_run_db:
+            repository.record_crawl_run(
+                CrawlRunRecord(
+                    run_id=run_id,
+                    source_name="dmfw",
+                    status="success",
+                    item_count=place_count,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                )
             )
-        )
         # Flush any remaining buffered progress to disk
         progress.save()
         logger.info(
@@ -426,17 +428,18 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
             )
             deduped.clear()
         finished_at = datetime.now(UTC).isoformat()
-        repository.record_crawl_run(
-            CrawlRunRecord(
-                run_id=run_id,
-                source_name="dmfw",
-                status="failed",
-                item_count=repository.count_places(),
-                started_at=started_at,
-                finished_at=finished_at,
-                error_message=str(exc),
+        if options.write_run_db:
+            repository.record_crawl_run(
+                CrawlRunRecord(
+                    run_id=run_id,
+                    source_name="dmfw",
+                    status="failed",
+                    item_count=repository.count_places(),
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    error_message=str(exc),
+                )
             )
-        )
         logger.error(f"抓取任务遇到异常中断: {exc}", exc_info=True)
         raise
 
@@ -502,6 +505,7 @@ def _iter_collect_partition(
     keyword: str,
     code: str,
     progress_tracker: DmfwProgressTracker,
+    division_repository: SQLiteDivisionRepository,
     partition_threshold: int,
     page_size: int,
     search_type: str,
@@ -530,7 +534,11 @@ def _iter_collect_partition(
         if code in division_children_cache:
             children = division_children_cache[code]
         else:
-            children = client.list_divisions(code)
+            children = _get_or_fetch_divisions(
+                client=client,
+                division_repository=division_repository,
+                code=code,
+            )
             division_children_cache[code] = children
         if children:
             logger.info(f"区划 {name} ({code}) 的总数 {total} 超过阈值 {partition_threshold}，开始细分下级区划抓取...")
@@ -542,6 +550,7 @@ def _iter_collect_partition(
                     keyword=keyword,
                     code=child.code,
                     progress_tracker=progress_tracker,
+                    division_repository=division_repository,
                     partition_threshold=partition_threshold,
                     page_size=page_size,
                     search_type=search_type,
@@ -574,6 +583,25 @@ def _iter_collect_partition(
         logger.info(f"区划 {name} ({code}) [总数 {total}]: 正在处理第 {page}/{total_pages} 页，获取到 {len(page_records)} 个地名")
         yield from _normalize_records(payload.get("records", []), keyword=keyword, partition_code=code, match_mode=match_mode, fetched_at_utc=fetched_at_utc)
     progress_tracker.mark_completed(keyword, code)
+
+
+def _get_or_fetch_divisions(
+    *,
+    client: DmfwApiClient,
+    division_repository: SQLiteDivisionRepository,
+    code: str,
+) -> list[DmfwDivision]:
+    cached = division_repository.list_divisions(parent_code=code)
+    if cached:
+        return cached
+    if division_repository.has_division_children_cache(code):
+        return []
+
+    divisions = client.list_divisions(code)
+    if divisions:
+        division_repository.upsert_divisions(divisions)
+    division_repository.mark_division_children_fetched(code)
+    return divisions
 
 
 def _normalize_records(
