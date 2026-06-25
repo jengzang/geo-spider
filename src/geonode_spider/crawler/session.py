@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import urlencode
 
 import requests
 
@@ -35,6 +36,7 @@ class SpiderSession:
     def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         failures = 0
         last_error: Exception | None = None
+        request_params = kwargs.get("params")
 
         for _ in range(self.profile.retries):
             self.rate_limiter.wait(failures)
@@ -55,7 +57,16 @@ class SpiderSession:
                     except Exception:
                         proxy_str = str(proxy_url)
 
-            logger.info(f"发送请求: {method} {url} | 出口/代理IP: {proxy_str}")
+            request_target = url
+            if request_params:
+                try:
+                    query_string = urlencode(request_params, doseq=True)
+                    if query_string:
+                        request_target = f"{url}?{query_string}"
+                except Exception:
+                    request_target = f"{url} | params={request_params}"
+
+            logger.info(f"发送请求: {method} {request_target} | 出口/代理IP: {proxy_str}")
 
             try:
                 response = self.session.request(

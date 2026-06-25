@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Callable, TypeVar
 
 from geonode_spider.models.place import DmfwDivision, DmfwPlaceRecord
-from geonode_spider.models.region import CrawlRunRecord, RegionNode
+from geonode_spider.models.region import CrawlRunRecord, RegionNode, utc_now_iso
 
 
 SQLITE_TIMEOUT_SECONDS = 30.0
@@ -62,6 +62,13 @@ CREATE TABLE IF NOT EXISTS dmfw_divisions (
     source_name TEXT NOT NULL,
     captured_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+)
+"""
+
+CREATE_DMFW_DIVISION_FETCHES_TABLE = """
+CREATE TABLE IF NOT EXISTS dmfw_division_fetches (
+    parent_code TEXT PRIMARY KEY,
+    fetched_at TEXT NOT NULL
 )
 """
 
@@ -178,6 +185,7 @@ class SQLiteDivisionRepository:
             with self._connect() as conn:
                 conn.execute(CREATE_CRAWL_RUNS_TABLE)
                 conn.execute(CREATE_DMFW_DIVISIONS_TABLE)
+                conn.execute(CREATE_DMFW_DIVISION_FETCHES_TABLE)
                 conn.execute(CREATE_DMFW_PLACES_TABLE)
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_dmfw_divisions_parent_code ON dmfw_divisions(parent_code)")
                 _ensure_dmfw_place_columns(conn)
@@ -216,6 +224,28 @@ class SQLiteDivisionRepository:
         with self._connect() as conn:
             rows = conn.execute(query, (parent_code,)).fetchall()
         return [DmfwDivision(**dict(row)) for row in rows]
+
+    def has_division_children_cache(self, parent_code: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM dmfw_division_fetches WHERE parent_code = ?",
+                (parent_code,),
+            ).fetchone()
+        return row is not None
+
+    def mark_division_children_fetched(self, parent_code: str, *, fetched_at: str | None = None) -> None:
+        timestamp = fetched_at or utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO dmfw_division_fetches (parent_code, fetched_at)
+                VALUES (?, ?)
+                ON CONFLICT(parent_code) DO UPDATE SET
+                    fetched_at = excluded.fetched_at
+                """,
+                (parent_code, timestamp),
+            )
+            conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=SQLITE_TIMEOUT_SECONDS)

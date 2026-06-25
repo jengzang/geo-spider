@@ -208,12 +208,16 @@ def sync_dmfw_divisions(*, settings: Settings) -> dict[str, object]:
     repository = SQLiteDivisionRepository(settings.sqlite_path)
     repository.initialize()
     client = _build_dmfw_api_client(settings)
-    divisions = client.list_divisions("0")
-    repository.upsert_divisions(divisions)
+    divisions = _sync_division_subtree(
+        client=client,
+        division_repository=repository,
+        code="0",
+    )
+    root_divisions = repository.list_divisions(parent_code="0")
     return {
         "source_name": "dmfw",
         "division_count": len(divisions),
-        "codes": [division.code for division in divisions],
+        "codes": [division.code for division in root_divisions],
     }
 
 
@@ -233,10 +237,13 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
         sync_dmfw_divisions(settings=settings)
 
     client = _build_dmfw_api_client(settings)
-    province_divisions = division_repository.list_divisions(parent_code="0")
+    province_divisions = _get_cached_divisions(
+        client=client,
+        division_repository=division_repository,
+        code="0",
+    )
     if not province_divisions:
-        province_divisions = client.list_divisions("0")
-        division_repository.upsert_divisions(province_divisions)
+        raise RuntimeError("省级区划缓存为空，请先运行区划同步或启用 sync_divisions_first=True")
     if options.province_codes:
         allowed = set(options.province_codes)
         province_divisions = [division for division in province_divisions if division.code in allowed]
@@ -384,7 +391,6 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
                     finished_at=finished_at,
                 )
             )
-        # Flush any remaining buffered progress to disk
         progress.save()
         logger.info(
             f"抓取任务顺利完成。累计抓取地名数: {fetched_total}，"
@@ -622,11 +628,11 @@ def _iter_collect_partition(
         if code in division_children_cache:
             children = division_children_cache[code]
         else:
-            children = division_repository.list_divisions(parent_code=code)
-            if not children:
-                children = client.list_divisions(code)
-                if children:
-                    division_repository.upsert_divisions(children)
+            children = _get_cached_divisions(
+                client=client,
+                division_repository=division_repository,
+                code=code,
+            )
             division_children_cache[code] = children
         if children:
             logger.info(f"区划 {name} ({code}) 的总数 {total} 超过阈值 {partition_threshold}，开始细分下级区划抓取...")
@@ -650,6 +656,7 @@ def _iter_collect_partition(
                 )
             progress_tracker.mark_completed(keyword, code)
             return
+        logger.info(f"区划 {name} ({code}) 缺少已缓存的下级区划，保持当前分区直接抓取")
 
     total_pages = max(1, (total + page_size - 1) // page_size)
     fetched_at_utc = utc_now_iso()
@@ -671,6 +678,65 @@ def _iter_collect_partition(
         logger.info(f"区划 {name} ({code}) [总数 {total}]: 正在处理第 {page}/{total_pages} 页，获取到 {len(page_records)} 个地名")
         yield from _normalize_records(payload.get("records", []), keyword=keyword, partition_code=code, match_mode=match_mode, fetched_at_utc=fetched_at_utc)
     progress_tracker.mark_completed(keyword, code)
+
+
+def _get_or_fetch_divisions(
+    *,
+    client: DmfwApiClient,
+    division_repository: SQLiteDivisionRepository,
+    code: str,
+) -> list[DmfwDivision]:
+    cached = division_repository.list_divisions(parent_code=code)
+    if cached:
+        return cached
+    if division_repository.has_division_children_cache(code):
+        return []
+
+    divisions = client.list_divisions(code)
+    if divisions:
+        division_repository.upsert_divisions(divisions)
+    division_repository.mark_division_children_fetched(code)
+    return divisions
+
+
+def _get_cached_divisions(
+    *,
+    client: DmfwApiClient,
+    division_repository: SQLiteDivisionRepository,
+    code: str,
+) -> list[DmfwDivision]:
+    _ = client
+    return division_repository.list_divisions(parent_code=code)
+
+
+def _sync_division_subtree(
+    *,
+    client: DmfwApiClient,
+    division_repository: SQLiteDivisionRepository,
+    code: str,
+    seen_codes: set[str] | None = None,
+) -> list[DmfwDivision]:
+    seen = seen_codes or set()
+    if code in seen:
+        return []
+    seen.add(code)
+
+    children = _get_or_fetch_divisions(
+        client=client,
+        division_repository=division_repository,
+        code=code,
+    )
+    collected = list(children)
+    for child in children:
+        collected.extend(
+            _sync_division_subtree(
+                client=client,
+                division_repository=division_repository,
+                code=child.code,
+                seen_codes=seen,
+            )
+        )
+    return collected
 
 
 def _normalize_records(

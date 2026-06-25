@@ -53,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     dmfw_parser.add_argument("--total-db-path", default=None, help="Optional custom path for the cumulative total database.")
     dmfw_parser.add_argument("--workers", type=int, default=1, help="Parallel worker count for multi-json task mode.")
 
-    subparsers.add_parser("sync-dmfw-divisions", help="Fetch and cache dmfw province divisions into SQLite.")
+    subparsers.add_parser("sync-dmfw-divisions", help="Fetch and cache the dmfw division tree into SQLite.")
 
     return parser
 
