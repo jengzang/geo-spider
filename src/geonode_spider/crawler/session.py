@@ -66,7 +66,7 @@ class SpiderSession:
                 except Exception:
                     request_target = f"{url} | params={request_params}"
 
-            logger.info(f"发送请求: {method} {request_target} | 出口/代理IP: {proxy_str}")
+            logger.info(f" · {method} {request_target} | IP: {proxy_str}")
 
             try:
                 response = self.session.request(

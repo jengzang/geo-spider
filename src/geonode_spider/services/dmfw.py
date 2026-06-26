@@ -45,6 +45,8 @@ class DmfwRunOptions:
     write_total_db: bool = False
     total_db_path: str | None = None
     skip_export: bool = False
+    # Parallel worker/logging label. It is None for normal single-task runs.
+    task_namespace: str | None = None
 
 
 class DmfwApiClient:
@@ -223,6 +225,9 @@ def sync_dmfw_divisions(*, settings: Settings) -> dict[str, object]:
 
 
 def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> dict[str, object]:
+    task_name = options.task_namespace or "single"
+    task_label = f"task={task_name}"
+
     division_repository = SQLiteDivisionRepository(settings.sqlite_path)
     division_repository.initialize()
     repository = SQLitePlaceRepository(settings.sqlite_path)
@@ -271,7 +276,7 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
     display_chars = display_chars[:50] + "..." if len(display_chars) > 50 else display_chars
     crawl_scope = "指定省份" if options.province_codes else "全国优先"
     logger.info(
-        f"开始抓取地名任务，匹配模式: {options.match_mode}，抓取范围: {crawl_scope}，"
+        f"{task_label} 开始抓取地名任务，匹配模式: {options.match_mode}，抓取范围: {crawl_scope}，"
         f"待处理字符: {display_chars} (共 {unique_count} 个去重汉字)，"
         f"可用省级区划数: {len(province_divisions)}"
     )
@@ -292,6 +297,9 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
     flush_count = 0
     persisted_total = 0
     fetched_total = 0
+    db_write_total_seconds = 0.0
+    db_write_total_rows = 0
+    last_batch_size = 0
     deduped: dict[str, DmfwPlaceRecord] = {}
     division_children_cache: dict[str, list[DmfwDivision]] = {}
     if not options.province_codes:
@@ -300,6 +308,50 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
         cached_children = division_repository.list_divisions(parent_code=division.code)
         if cached_children:
             division_children_cache[division.code] = cached_children
+
+    def persist_batch(batch: list[DmfwPlaceRecord], *, reason: str) -> float:
+        nonlocal flush_count, db_write_total_seconds, db_write_total_rows, last_batch_size
+
+        batch_size = len(batch)
+        last_batch_size = batch_size
+        write_started = time.monotonic()
+        if options.write_run_db:
+            repository.upsert_places(batch)
+        if total_repository is not None:
+            print(f"[DB_WRITE_START] pid={os.getpid()} {task_label} batch={batch_size} reason={reason}", flush=True)
+            total_repository.upsert_places(batch)
+            print(f"[DB_WRITE_DONE] pid={os.getpid()} {task_label} batch={batch_size} reason={reason}", flush=True)
+        write_elapsed = time.monotonic() - write_started
+        db_write_total_seconds += write_elapsed
+        db_write_total_rows += batch_size
+        flush_count += 1
+        return write_elapsed
+
+    def emit_exit_summary(*, status: str, error: BaseException | None = None) -> None:
+        elapsed_seconds = max(time.monotonic() - started_monotonic, 0.000001)
+        fetched_per_hour = fetched_total / elapsed_seconds * 3600
+        fetched_per_minute = fetched_total / elapsed_seconds * 60
+        avg_batch_size = db_write_total_rows / flush_count if flush_count else 0.0
+        avg_db_write_seconds = db_write_total_seconds / flush_count if flush_count else 0.0
+        province_part = ",".join(division.code for division in province_divisions) if options.province_codes else "all"
+        error_part = ""
+        if error is not None:
+            error_part = f" error_type={type(error).__name__} error={str(error)!r}"
+        summary = (
+            f"[WORKER_SUMMARY] status={status} pid={os.getpid()} {task_label} run_id={run_id} "
+            f"elapsed_sec={elapsed_seconds:.2f} elapsed={_format_duration(elapsed_seconds)} "
+            f"chars={unique_count} match_mode={options.match_mode} search_type={options.search_type} "
+            f"province_codes={province_part} fetched_total={fetched_total} "
+            f"fetched_per_hour={fetched_per_hour:.2f} fetched_per_minute={fetched_per_minute:.2f} "
+            f"flush_count={flush_count} db_write_rows={db_write_total_rows} "
+            f"last_batch_size={last_batch_size} avg_batch_size={avg_batch_size:.2f} "
+            f"db_write_total_sec={db_write_total_seconds:.3f} avg_db_write_sec={avg_db_write_seconds:.3f} "
+            f"pending_in_memory={len(deduped)} write_run_db={options.write_run_db} "
+            f"write_total_db={options.write_total_db} total_db_path={str(total_db_path) if total_db_path is not None else ''}"
+            f"{error_part}"
+        )
+        print(summary, flush=True)
+        logger.info(summary)
 
     try:
         for char in _normalize_chars(options.chars):
@@ -326,30 +378,18 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
                     fetched_total += 1
                     if len(deduped) >= options.flush_batch_size:
                         batch = list(deduped.values())
-                        if options.write_run_db:
-                            repository.upsert_places(batch)
-                        if total_repository is not None:
-                            print(f"[DB_WRITE_START] pid={os.getpid()} batch={len(batch)}", flush=True)
-                            total_repository.upsert_places(batch)
-                            print(f"[DB_WRITE_DONE] pid={os.getpid()} batch={len(batch)}", flush=True)
-                        flush_count += 1
+                        write_elapsed = persist_batch(batch, reason="periodic")
                         logger.info(
-                            f"已批量写入 {len(batch)} 个地名至数据库。当前此运行累计获取 {fetched_total} 个地名，"
-                            f"累计写入批次数: {flush_count}"
+                            f"{task_label} 已批量写入 {len(batch)} 个地名至数据库。当前此运行累计获取 {fetched_total} 个地名，"
+                            f"累计写入批次数: {flush_count}，本次写入耗时: {write_elapsed:.3f}s"
                         )
                         deduped.clear()
         if deduped:
             batch = list(deduped.values())
-            if options.write_run_db:
-                repository.upsert_places(batch)
-            if total_repository is not None:
-                print(f"[DB_WRITE_START] pid={os.getpid()} batch={len(batch)}", flush=True)
-                total_repository.upsert_places(batch)
-                print(f"[DB_WRITE_DONE] pid={os.getpid()} batch={len(batch)}", flush=True)
-            flush_count += 1
+            write_elapsed = persist_batch(batch, reason="final")
             logger.info(
-                f"已批量写入最后一批 {len(batch)} 个地名至数据库。当前此运行累计获取 {fetched_total} 个地名，"
-                f"累计写入批次数: {flush_count}"
+                f"{task_label} 已批量写入最后一批 {len(batch)} 个地名至数据库。当前此运行累计获取 {fetched_total} 个地名，"
+                f"累计写入批次数: {flush_count}，本次写入耗时: {write_elapsed:.3f}s"
             )
             deduped.clear()
 
@@ -398,9 +438,10 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
             )
         progress.save()
         logger.info(
-            f"抓取任务顺利完成。累计抓取地名数: {fetched_total}，"
+            f"{task_label} 抓取任务顺利完成。累计抓取地名数: {fetched_total}，"
             f"数据库已保存总数: {persisted_total}，累计写入批次数: {flush_count}"
         )
+        emit_exit_summary(status="success")
     except BaseException as exc:
         try:
             progress.save()
@@ -408,16 +449,10 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
             pass
         if deduped:
             batch = list(deduped.values())
-            if options.write_run_db:
-                repository.upsert_places(batch)
-            if total_repository is not None:
-                print(f"[DB_WRITE_START] pid={os.getpid()} batch={len(batch)}", flush=True)
-                total_repository.upsert_places(batch)
-                print(f"[DB_WRITE_DONE] pid={os.getpid()} batch={len(batch)}", flush=True)
-            flush_count += 1
+            write_elapsed = persist_batch(batch, reason="exception_final")
             logger.info(
-                f"异常退出前：已批量写入最后一批 {len(batch)} 个地名至数据库。当前此运行累计获取 {fetched_total} 个地名，"
-                f"累计写入批次数: {flush_count}"
+                f"{task_label} 异常退出前：已批量写入最后一批 {len(batch)} 个地名至数据库。当前此运行累计获取 {fetched_total} 个地名，"
+                f"累计写入批次数: {flush_count}，本次写入耗时: {write_elapsed:.3f}s"
             )
             deduped.clear()
         finished_at = datetime.now(UTC).isoformat()
@@ -433,7 +468,8 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
                     error_message=str(exc),
                 )
             )
-        logger.error(f"抓取任务遇到异常中断: {exc}", exc_info=True)
+        emit_exit_summary(status="failed", error=exc)
+        logger.error(f"{task_label} 抓取任务遇到异常中断: {exc}", exc_info=True)
         raise
 
     return {
@@ -446,6 +482,7 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
         "province_codes": [division.code for division in province_divisions],
         "exported_files": exported,
         "task_json": options.json_path,
+        "task_namespace": options.task_namespace,
         "write_run_db": options.write_run_db,
         "write_total_db": options.write_total_db,
         "total_db_path": str(total_db_path) if total_db_path is not None else None,
@@ -509,6 +546,7 @@ def _run_dmfw_parallel_task_worker(settings: Settings, options: DmfwRunOptions, 
         write_run_db=False,
         skip_export=True,
         sync_divisions_first=False,
+        task_namespace=task_namespace,
     )
     logging.basicConfig(
         level=logging.INFO,
@@ -564,6 +602,17 @@ def _build_task_namespace(options: DmfwRunOptions) -> str:
         if safe:
             return safe
     return f"task-{abs(hash((options.chars, options.match_mode, tuple(options.province_codes or []))))}"
+
+
+def _format_duration(seconds: float) -> str:
+    seconds_int = max(0, int(seconds))
+    hours, remainder = divmod(seconds_int, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
 
 
 def export_dmfw_places(
