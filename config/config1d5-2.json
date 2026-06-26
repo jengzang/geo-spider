@@ -1,8 +1,8 @@
 {
-    "chars": "data/processed/hanzi_1w-3w.txt",
+    "chars": "data/chars/hanzi_1d5-2w.txt",
     "match_mode": "contain",
     "resume": true,
-    "flush_batch_size": 1000,
+    "flush_batch_size": 5000,
     "sync_divisions_first": true,
     "no_write_run_db": true,
     "write_total_db": true,

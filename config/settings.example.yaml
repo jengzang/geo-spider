@@ -30,3 +30,7 @@ dmfw:
   page_size: 100
   partition_threshold: 3000
   search_type: 模糊匹配
+
+run:
+  cli-multi: python scripts/run_dmfw_chars.py --json config/config0d7-1.json --json config/config1-2.json --json config/config2-3.json --json config/config3+.json --worker 4
+  cli-single: python scripts/run_dmfw_chars.py --json config/config.json

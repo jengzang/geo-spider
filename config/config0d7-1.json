@@ -1,5 +1,5 @@
 {
-    "chars": "data/chars/all_unicode_hanzi.txt",
+    "chars": "data/chars/hanzi_0d7-1w.txt",
     "match_mode": "contain",
     "resume": true,
     "flush_batch_size": 5000,

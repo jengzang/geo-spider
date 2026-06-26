@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from pathlib import Path
-from typing import Callable, TypeVar
+from typing import Callable, Iterable, TypeVar
 
 from geonode_spider.models.place import DmfwDivision, DmfwPlaceRecord
 from geonode_spider.models.region import CrawlRunRecord, RegionNode, utc_now_iso
@@ -169,6 +169,7 @@ def _run_with_locked_retry(
             if not _is_locked_error(exc) or attempt >= attempts:
                 raise
             last_error = exc
+            print(f"[SQLITE_LOCK] attempt={attempt}/{attempts}, retry in {delay_seconds}s: {exc}", flush=True)
             time.sleep(delay_seconds)
     if last_error is not None:
         raise last_error

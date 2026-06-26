@@ -1,8 +1,8 @@
 {
-    "chars": "data/chars/all_unicode_hanzi.txt",
+    "chars": "data/chars/hanzi_3w+.txt",
     "match_mode": "contain",
     "resume": true,
-    "flush_batch_size": 5000,
+    "flush_batch_size": 1000,
     "sync_divisions_first": true,
     "no_write_run_db": true,
     "write_total_db": true,

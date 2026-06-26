@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 import logging
+import os
 import shutil
 import sqlite3
 import time
@@ -328,7 +329,9 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
                         if options.write_run_db:
                             repository.upsert_places(batch)
                         if total_repository is not None:
+                            print(f"[DB_WRITE_START] pid={os.getpid()} batch={len(batch)}", flush=True)
                             total_repository.upsert_places(batch)
+                            print(f"[DB_WRITE_DONE] pid={os.getpid()} batch={len(batch)}", flush=True)
                         flush_count += 1
                         logger.info(
                             f"已批量写入 {len(batch)} 个地名至数据库。当前此运行累计获取 {fetched_total} 个地名，"
@@ -340,7 +343,9 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
             if options.write_run_db:
                 repository.upsert_places(batch)
             if total_repository is not None:
+                print(f"[DB_WRITE_START] pid={os.getpid()} batch={len(batch)}", flush=True)
                 total_repository.upsert_places(batch)
+                print(f"[DB_WRITE_DONE] pid={os.getpid()} batch={len(batch)}", flush=True)
             flush_count += 1
             logger.info(
                 f"已批量写入最后一批 {len(batch)} 个地名至数据库。当前此运行累计获取 {fetched_total} 个地名，"
@@ -406,7 +411,9 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
             if options.write_run_db:
                 repository.upsert_places(batch)
             if total_repository is not None:
+                print(f"[DB_WRITE_START] pid={os.getpid()} batch={len(batch)}", flush=True)
                 total_repository.upsert_places(batch)
+                print(f"[DB_WRITE_DONE] pid={os.getpid()} batch={len(batch)}", flush=True)
             flush_count += 1
             logger.info(
                 f"异常退出前：已批量写入最后一批 {len(batch)} 个地名至数据库。当前此运行累计获取 {fetched_total} 个地名，"
@@ -503,6 +510,12 @@ def _run_dmfw_parallel_task_worker(settings: Settings, options: DmfwRunOptions, 
         skip_export=True,
         sync_divisions_first=False,
     )
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] pid=%(process)d %(name)s: %(message)s",
+        force=True,
+    )
+    print(f"[WORKER_START] pid={os.getpid()} task={task_namespace}", flush=True)
     return run_dmfw_chars_pipeline(settings=worker_settings, options=worker_options)
 
 
