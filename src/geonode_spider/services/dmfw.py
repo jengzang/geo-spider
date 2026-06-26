@@ -26,7 +26,7 @@ from geonode_spider.models.region import CrawlRunRecord, utc_now_iso
 from geonode_spider.storage.sqlite import SQLiteDivisionRepository, SQLitePlaceRepository, SQLiteTotalPlaceRepository
 
 
-MAX_PARALLEL_DMFW_WORKERS = 4
+MAX_PARALLEL_DMFW_WORKERS = 8
 
 
 @dataclass(slots=True)

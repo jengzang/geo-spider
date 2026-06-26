@@ -32,5 +32,8 @@ dmfw:
   search_type: 模糊匹配
 
 run:
-  cli-multi: python scripts/run_dmfw_chars.py --json config/config0d7-1.json --json config/config1-2.json --json config/config2-3.json --json config/config3+.json --worker 4
+  cli-multi: python scripts/run_dmfw_chars.py --json config/config1-1d5.json --json config/config1d5-2.json --json config/config2-3.json --json config/config3+.json --worker 4
+
   cli-single: python scripts/run_dmfw_chars.py --json config/config.json
+
+  cli-all: python scripts/run_dmfw_chars.py --json config/config0d7-1.json --json config/config1-1d35.json --json config/config1d35-1d7.json --json config/config1d7-2.json --json config/config2-2d4.json --json config/config2d4-3.json --worker 6
