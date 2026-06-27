@@ -271,7 +271,8 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
         division_names[div.code] = div.name
     division_names[""] = "全国"
 
-    unique_count = len(_normalize_chars(options.chars))
+    normalized_chars = _normalize_chars(options.chars)
+    unique_count = len(normalized_chars)
     display_chars = options.chars.replace("\n", " ").replace("\r", " ")
     display_chars = display_chars[:50] + "..." if len(display_chars) > 50 else display_chars
     crawl_scope = "指定省份" if options.province_codes else "全国优先"
@@ -297,9 +298,22 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
     flush_count = 0
     persisted_total = 0
     fetched_total = 0
+    current_char = ""
+    current_char_index = 0
+    completed_chars = 0
     db_write_total_seconds = 0.0
     db_write_total_rows = 0
     last_batch_size = 0
+    progress_context: dict[str, object] = {
+        "current_keyword": "",
+        "current_code": "",
+        "current_name": "",
+        "current_token": "",
+        "last_completed_keyword": "",
+        "last_completed_code": "",
+        "last_completed_name": "",
+        "last_completed_token": "",
+    }
     deduped: dict[str, DmfwPlaceRecord] = {}
     division_children_cache: dict[str, list[DmfwDivision]] = {}
     if not options.province_codes:
@@ -334,27 +348,90 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
         avg_batch_size = db_write_total_rows / flush_count if flush_count else 0.0
         avg_db_write_seconds = db_write_total_seconds / flush_count if flush_count else 0.0
         province_part = ",".join(division.code for division in province_divisions) if options.province_codes else "all"
-        error_part = ""
+
+        total_chars = unique_count
+        safe_total_chars = max(1, total_chars)
+        active_char_index = current_char_index if current_char_index else completed_chars
+        active_char = current_char if current_char else "<none>"
+        is_char_in_progress = bool(current_char and completed_chars < current_char_index)
+        active_progress_percent = active_char_index / safe_total_chars * 100
+        completed_progress_percent = completed_chars / safe_total_chars * 100
+        remaining_chars = max(0, total_chars - completed_chars)
+
+        current_partition_keyword = str(progress_context.get("current_keyword") or "")
+        current_partition_code = str(progress_context.get("current_code") or "")
+        current_partition_name = str(progress_context.get("current_name") or "")
+        current_partition_token = str(progress_context.get("current_token") or "")
+        last_completed_keyword = str(progress_context.get("last_completed_keyword") or "")
+        last_completed_code = str(progress_context.get("last_completed_code") or "")
+        last_completed_name = str(progress_context.get("last_completed_name") or "")
+        last_completed_token = str(progress_context.get("last_completed_token") or "")
+
+        error_type = type(error).__name__ if error is not None else ""
+        error_message = str(error) if error is not None else ""
+        total_db_path_text = str(total_db_path) if total_db_path is not None else ""
+
+        summary_lines = [
+            "[WORKER_SUMMARY_BEGIN]",
+            f"  status          : {status}",
+            f"  pid             : {os.getpid()}",
+            f"  task            : {task_name}",
+            f"  run_id          : {run_id}",
+            f"  elapsed         : {_format_duration(elapsed_seconds)} ({elapsed_seconds:.2f}s)",
+            "",
+            "  [char_progress]",
+            f"  total_chars     : {total_chars}",
+            f"  current_char    : {active_char!r}",
+            f"  current_index   : {active_char_index}/{total_chars} ({active_progress_percent:.2f}%)",
+            f"  completed_chars : {completed_chars}/{total_chars} ({completed_progress_percent:.2f}%)",
+            f"  remaining_chars : {remaining_chars}",
+            f"  in_progress     : {is_char_in_progress}",
+            "",
+            "  [partition_progress]",
+            f"  current_keyword : {current_partition_keyword!r}",
+            f"  current_code    : {current_partition_code!r}",
+            f"  current_name    : {current_partition_name!r}",
+            f"  current_token   : {current_partition_token!r}",
+            f"  last_done_key   : {last_completed_keyword!r}",
+            f"  last_done_code  : {last_completed_code!r}",
+            f"  last_done_name  : {last_completed_name!r}",
+            f"  last_done_token : {last_completed_token!r}",
+            "",
+            "  [throughput]",
+            f"  fetched_total   : {fetched_total}",
+            f"  fetched_rate    : {fetched_per_hour:.2f}/hour | {fetched_per_minute:.2f}/minute",
+            f"  pending_memory  : {len(deduped)}",
+            "",
+            "  [db_write]",
+            f"  flush_count     : {flush_count}",
+            f"  db_write_rows   : {db_write_total_rows}",
+            f"  last_batch_size : {last_batch_size}",
+            f"  avg_batch_size  : {avg_batch_size:.2f}",
+            f"  total_write_sec : {db_write_total_seconds:.3f}",
+            f"  avg_write_sec   : {avg_db_write_seconds:.3f}",
+            "",
+            "  [options]",
+            f"  match_mode      : {options.match_mode}",
+            f"  search_type     : {options.search_type}",
+            f"  province_codes  : {province_part}",
+            f"  write_run_db    : {options.write_run_db}",
+            f"  write_total_db  : {options.write_total_db}",
+            f"  total_db_path   : {total_db_path_text}",
+        ]
         if error is not None:
-            error_part = f" error_type={type(error).__name__} error={str(error)!r}"
-        summary = (
-            f"[WORKER_SUMMARY] status={status} pid={os.getpid()} {task_label} run_id={run_id} "
-            f"elapsed_sec={elapsed_seconds:.2f} elapsed={_format_duration(elapsed_seconds)} "
-            f"chars={unique_count} match_mode={options.match_mode} search_type={options.search_type} "
-            f"province_codes={province_part} fetched_total={fetched_total} "
-            f"fetched_per_hour={fetched_per_hour:.2f} fetched_per_minute={fetched_per_minute:.2f} "
-            f"flush_count={flush_count} db_write_rows={db_write_total_rows} "
-            f"last_batch_size={last_batch_size} avg_batch_size={avg_batch_size:.2f} "
-            f"db_write_total_sec={db_write_total_seconds:.3f} avg_db_write_sec={avg_db_write_seconds:.3f} "
-            f"pending_in_memory={len(deduped)} write_run_db={options.write_run_db} "
-            f"write_total_db={options.write_total_db} total_db_path={str(total_db_path) if total_db_path is not None else ''}"
-            f"{error_part}"
-        )
-        print(summary, flush=True)
-        logger.info(summary)
+            summary_lines.extend([
+                "",
+                "  [error]",
+                f"  error_type      : {error_type}",
+                f"  error_message   : {error_message!r}",
+            ])
+        summary_lines.append("[WORKER_SUMMARY_END]")
+
+        print("\n".join(summary_lines), flush=True)
 
     try:
-        for char in _normalize_chars(options.chars):
+        for current_char_index, char in enumerate(normalized_chars, start=1):
+            current_char = char
             initial_divisions = province_divisions if options.province_codes else [
                 DmfwDivision(code="", name="全国", parent_code="", level="country")
             ]
@@ -373,6 +450,7 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
                     max_runtime_seconds=options.max_runtime_seconds,
                     division_names=division_names,
                     division_children_cache=division_children_cache,
+                    progress_context=progress_context,
                 ):
                     deduped[place.source_id] = place
                     fetched_total += 1
@@ -384,6 +462,8 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
                             f"累计写入批次数: {flush_count}，本次写入耗时: {write_elapsed:.3f}s"
                         )
                         deduped.clear()
+            completed_chars = current_char_index
+        
         if deduped:
             batch = list(deduped.values())
             write_elapsed = persist_batch(batch, reason="final")
@@ -670,8 +750,14 @@ def _iter_collect_partition(
     max_runtime_seconds: int | None,
     division_names: dict[str, str],
     division_children_cache: dict[str, list[DmfwDivision]],
+    progress_context: dict[str, object] | None = None,
 ):
     name = division_names.get(code, code)
+    if progress_context is not None:
+        progress_context["current_keyword"] = keyword
+        progress_context["current_code"] = code
+        progress_context["current_name"] = name
+        progress_context["current_token"] = f"{keyword}|{code}"
     if progress_tracker.is_completed(keyword, code):
         logger.info(f"区划 {name} ({code}) 字符 '{keyword}' 已在历史进度中完成，跳过")
         return
@@ -715,8 +801,14 @@ def _iter_collect_partition(
                     max_runtime_seconds=max_runtime_seconds,
                     division_names=division_names,
                     division_children_cache=division_children_cache,
+                    progress_context=progress_context,
                 )
             progress_tracker.mark_completed(keyword, code)
+            if progress_context is not None:
+                progress_context["last_completed_keyword"] = keyword
+                progress_context["last_completed_code"] = code
+                progress_context["last_completed_name"] = name
+                progress_context["last_completed_token"] = f"{keyword}|{code}"
             return
         logger.info(f"区划 {name} ({code}) 缺少已缓存的下级区划，保持当前分区直接抓取")
 
@@ -740,6 +832,11 @@ def _iter_collect_partition(
         logger.info(f"区划 {name} ({code}) [总数 {total}]: 正在处理第 {page}/{total_pages} 页，获取到 {len(page_records)} 个地名")
         yield from _normalize_records(payload.get("records", []), keyword=keyword, partition_code=code, match_mode=match_mode, fetched_at_utc=fetched_at_utc)
     progress_tracker.mark_completed(keyword, code)
+    if progress_context is not None:
+        progress_context["last_completed_keyword"] = keyword
+        progress_context["last_completed_code"] = code
+        progress_context["last_completed_name"] = name
+        progress_context["last_completed_token"] = f"{keyword}|{code}"
 
 
 def _get_or_fetch_divisions(
