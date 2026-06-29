@@ -4,6 +4,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 import logging
 import os
+import signal
 import shutil
 import sqlite3
 import time
@@ -523,33 +524,42 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
         )
         emit_exit_summary(status="success")
     except BaseException as exc:
+        # During shutdown, finish the final DB flush and summary before accepting another Ctrl+C.
+        # This prevents half-printed DB_WRITE_START logs and keeps progress behind DB writes.
+        old_sigint_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
-            progress.save()
-        except Exception:
-            pass
-        if deduped:
-            batch = list(deduped.values())
-            write_elapsed = persist_batch(batch, reason="exception_final")
-            logger.info(
-                f"{task_label} 异常退出前：已批量写入最后一批 {len(batch)} 个地名至数据库。当前此运行累计获取 {fetched_total} 个地名，"
-                f"累计写入批次数: {flush_count}，本次写入耗时: {write_elapsed:.3f}s"
-            )
-            deduped.clear()
-        finished_at = datetime.now(UTC).isoformat()
-        if options.write_run_db:
-            repository.record_crawl_run(
-                CrawlRunRecord(
-                    run_id=run_id,
-                    source_name="dmfw",
-                    status="failed",
-                    item_count=repository.count_places(),
-                    started_at=started_at,
-                    finished_at=finished_at,
-                    error_message=str(exc),
+            if deduped:
+                batch = list(deduped.values())
+                write_elapsed = persist_batch(batch, reason="exception_final")
+                logger.info(
+                    f"{task_label} 异常退出前：已批量写入最后一批 {len(batch)} 个地名至数据库。当前此运行累计获取 {fetched_total} 个地名，"
+                    f"累计写入批次数: {flush_count}，本次写入耗时: {write_elapsed:.3f}s"
                 )
-            )
-        emit_exit_summary(status="failed", error=exc)
-        logger.error(f"{task_label} 抓取任务遇到异常中断: {exc}", exc_info=True)
+                deduped.clear()
+            try:
+                progress.save()
+            except Exception as save_exc:
+                logger.warning(f"{task_label} 异常退出时保存进度文件失败: {save_exc}")
+            finished_at = datetime.now(UTC).isoformat()
+            if options.write_run_db:
+                repository.record_crawl_run(
+                    CrawlRunRecord(
+                        run_id=run_id,
+                        source_name="dmfw",
+                        status="failed",
+                        item_count=repository.count_places(),
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        error_message=str(exc),
+                    )
+                )
+            emit_exit_summary(status="failed", error=exc)
+        finally:
+            signal.signal(signal.SIGINT, old_sigint_handler)
+        if isinstance(exc, KeyboardInterrupt):
+            logger.info(f"{task_label} 抓取任务收到 Ctrl+C，已完成最后写库、进度保存和 summary 输出。")
+        else:
+            logger.error(f"{task_label} 抓取任务遇到异常中断: {exc}", exc_info=True)
         raise
 
     return {
@@ -591,8 +601,39 @@ def run_dmfw_parallel_tasks(*, settings: Settings, task_options: list[DmfwRunOpt
                 _build_task_namespace(option),
             )
             future_map[future] = option
-        for future in as_completed(list(future_map)):
-            results.append(future.result())
+        try:
+            for future in as_completed(list(future_map)):
+                results.append(future.result())
+        except KeyboardInterrupt:
+            print("[PARALLEL_INTERRUPT] Ctrl+C received; waiting workers to flush final batches and summaries...", flush=True)
+            old_sigint_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
+            try:
+                for future in as_completed(list(future_map)):
+                    option = future_map[future]
+                    task_namespace = _build_task_namespace(option)
+                    try:
+                        results.append(future.result())
+                        print(f"[PARALLEL_WORKER_FINISHED] task={task_namespace} status=success", flush=True)
+                    except BaseException as worker_exc:
+                        print(
+                            f"[PARALLEL_WORKER_FINISHED] task={task_namespace} "
+                            f"status=failed error_type={type(worker_exc).__name__}",
+                            flush=True,
+                        )
+            finally:
+                signal.signal(signal.SIGINT, old_sigint_handler)
+
+            print("[PARALLEL_INTERRUPT_DONE] all active workers finished final flush and summaries.", flush=True)
+
+            return {
+                "mode": "parallel",
+                "interrupted": True,
+                "task_count": len(task_options),
+                "workers": effective_workers,
+                "max_supported_workers": MAX_PARALLEL_DMFW_WORKERS,
+                "total_db_path": str(total_db_path),
+                "tasks": sorted(results, key=lambda item: str(item.get("task_json") or "")),
+            }
 
     total_repository = SQLiteTotalPlaceRepository(total_db_path)
     total_repository.initialize()
