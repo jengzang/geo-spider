@@ -138,6 +138,8 @@ class DmfwProgressTracker:
     _dirty: bool = field(init=False, repr=False, default=False)
     _pending_count: int = field(init=False, repr=False, default=0)
     _write_threshold: int = field(init=False, repr=False, default=1)
+    _shared_path: Path | None = field(init=False, repr=False, default=None)
+    _shared_lock: object = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
         if self.resume and self.path.exists():
@@ -152,7 +154,7 @@ class DmfwProgressTracker:
         self._state["completed"] = list(completed) if isinstance(completed, list) else []
         self._dirty = False
         self._pending_count = 0
-        self._write_threshold = 1000 if len(self.chars) > 100 else 1
+        self._write_threshold = 500 if len(self.chars) > 100 else 1
         if self.resume:
             self._import_other_progress()
         if not (self.resume and self.path.exists()):
@@ -224,12 +226,96 @@ class DmfwProgressTracker:
             if self._pending_count >= self._write_threshold:
                 self.save()
 
+    def set_shared_progress(self, path: Path, lock) -> None:
+        self._shared_path = path
+        self._shared_lock = lock
+        try:
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                self._merge_from_shared(data)
+            # 强制 save：共享文件不存在时创建它，有新导入时推进本地文件
+            if not path.exists() or self._dirty:
+                self._dirty = True
+                self.save()
+        except Exception:
+            pass
+
+    def _merge_from_shared(self, data: dict) -> None:
+        own_chars = set(self.chars.replace("\n", "").replace("\r", ""))
+        completed = data.get("completed", [])
+        if not isinstance(completed, list):
+            return
+        imported = 0
+        for token in completed:
+            token_str = str(token)
+            if token_str in self._completed_set:
+                continue
+            keyword = token_str.split("|")[0]
+            if keyword not in own_chars:
+                continue
+            self._completed_set.add(token_str)
+            imported += 1
+        if imported:
+            self._state["completed"] = list(self._completed_set)
+            self._dirty = True
+            logger.info(
+                f"Imported {imported} completed partitions from shared progress."
+            )
+
     def save(self) -> None:
-        if self._dirty:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps(self._state, ensure_ascii=False, indent=2), encoding="utf-8")
-            self._dirty = False
-            self._pending_count = 0
+        if not self._dirty:
+            return
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(
+            json.dumps(self._state, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        if self._shared_path is not None and self._shared_lock is not None:
+            with self._shared_lock:
+                try:
+                    if self._shared_path.exists():
+                        shared = json.loads(
+                            self._shared_path.read_text(encoding="utf-8")
+                        )
+                        logger.info(
+                            "[SHARED_SYNC] read shared progress: "
+                            f"shared_tokens={len(shared.get('completed', []))} "
+                            f"local_tokens={len(self._completed_set)}"
+                        )
+                    else:
+                        shared = {"completed": []}
+                        logger.info(
+                            "[SHARED_SYNC] shared progress file not found, creating new."
+                        )
+
+                    shared_completed = shared.get("completed", [])
+                    shared_set = (
+                        {str(t) for t in shared_completed}
+                        if isinstance(shared_completed, list)
+                        else set()
+                    )
+
+                    merged = shared_set | self._completed_set
+                    new_local = len(merged) - len(shared_set)
+
+                    self._merge_from_shared({"completed": list(shared_set)})
+
+                    shared["completed"] = sorted(merged)
+                    self._shared_path.parent.mkdir(parents=True, exist_ok=True)
+                    self._shared_path.write_text(
+                        json.dumps(shared, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    logger.info(
+                        "[SHARED_SYNC] wrote shared progress: "
+                        f"total_tokens={len(merged)} new_from_this_worker={new_local}"
+                    )
+                except Exception:
+                    pass
+
+        self._dirty = False
+        self._pending_count = 0
 
 
 def sync_dmfw_divisions(*, settings: Settings) -> dict[str, object]:
@@ -249,7 +335,7 @@ def sync_dmfw_divisions(*, settings: Settings) -> dict[str, object]:
     }
 
 
-def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions, stop_event=None) -> dict[str, object]:
+def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions, stop_event=None, shared_progress_path=None, shared_lock=None) -> dict[str, object]:
     task_name = options.task_namespace or "single"
     task_label = f"task={task_name}"
 
@@ -314,6 +400,9 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions, stop
         chars=options.chars,
         resume=options.resume,
     )
+
+    if shared_progress_path is not None and shared_lock is not None:
+        progress.set_shared_progress(shared_progress_path, shared_lock)
 
     requested_formats = _normalize_formats(options.export_formats or ["db"])
     db_only_export = set(requested_formats) == {"db"}
@@ -642,6 +731,8 @@ def run_dmfw_parallel_tasks(*, settings: Settings, task_options: list[DmfwRunOpt
     manager = mp.Manager()
     stop_event = manager.Event()
     ctx = mp.get_context("spawn")
+    shared_progress_path = _build_shared_progress_path(settings, task_options[0])
+    shared_lock = manager.Lock()
     future_to_task: dict[object, DmfwRunOptions] = {}
     results: list[dict[str, object]] = []
     finished_task_namespaces: set[str] = set()
@@ -660,6 +751,8 @@ def run_dmfw_parallel_tasks(*, settings: Settings, task_options: list[DmfwRunOpt
                 option,
                 task_namespace,
                 stop_event,
+                shared_progress_path,
+                shared_lock,
             )
             future_to_task[future] = option
 
@@ -682,7 +775,8 @@ def run_dmfw_parallel_tasks(*, settings: Settings, task_options: list[DmfwRunOpt
                     except Exception as exc:
                         print(
                             f"[PARALLEL_WORKER_FINISHED] task={task_name} "
-                            f"status=failed error_type={type(exc).__name__}",
+                            f"status=failed error_type={type(exc).__name__} "
+                            f"error={exc}",
                             flush=True,
                         )
                         continue
@@ -736,7 +830,8 @@ def run_dmfw_parallel_tasks(*, settings: Settings, task_options: list[DmfwRunOpt
                         except Exception as exc:
                             print(
                                 f"[PARALLEL_WORKER_FINISHED] task={task_name} "
-                                f"status=failed error_type={type(exc).__name__}",
+                                f"status=failed error_type={type(exc).__name__} "
+                                f"error={exc}",
                                 flush=True,
                             )
                             continue
@@ -812,7 +907,7 @@ def run_dmfw_parallel_tasks(*, settings: Settings, task_options: list[DmfwRunOpt
     }
 
 
-def _run_dmfw_parallel_task_worker(settings: Settings, options: DmfwRunOptions, task_namespace: str, stop_event=None) -> dict[str, object]:
+def _run_dmfw_parallel_task_worker(settings: Settings, options: DmfwRunOptions, task_namespace: str, stop_event=None, shared_progress_path=None, shared_lock=None) -> dict[str, object]:
     worker_settings = replace(settings, raw_dir=settings.raw_dir / task_namespace)
     worker_options = replace(
         options,
@@ -827,7 +922,13 @@ def _run_dmfw_parallel_task_worker(settings: Settings, options: DmfwRunOptions, 
         force=True,
     )
     print(f"[WORKER_START] pid={os.getpid()} task={task_namespace}", flush=True)
-    return run_dmfw_chars_pipeline(settings=worker_settings, options=worker_options, stop_event=stop_event)
+    return run_dmfw_chars_pipeline(
+        settings=worker_settings,
+        options=worker_options,
+        stop_event=stop_event,
+        shared_progress_path=shared_progress_path,
+        shared_lock=shared_lock,
+    )
 
 
 def _build_dmfw_api_client(settings: Settings) -> DmfwApiClient:
@@ -1213,6 +1314,18 @@ def _build_progress_filename(chars: str, match_mode: str, province_codes: list[s
         safe_chars = hashlib.md5(safe_chars.encode("utf-8")).hexdigest()
     province_suffix = "all" if not province_codes else "-".join(province_codes)
     return f"dmfw_chars_{safe_chars}_{match_mode}_{province_suffix}.progress.json"
+
+
+def _build_shared_progress_path(settings: Settings, options: DmfwRunOptions) -> Path:
+    match_mode = options.match_mode
+    province_suffix = (
+        "all" if not options.province_codes
+        else "-".join(options.province_codes)
+    )
+    return (
+        settings.raw_dir
+        / f"dmfw_chars_shared_{match_mode}_{province_suffix}.progress.json"
+    )
 
 
 def _normalize_chars(raw_chars: str) -> list[str]:
