@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 import json
 import logging
+import multiprocessing as mp
 import os
 import signal
 import shutil
@@ -28,6 +29,29 @@ from geonode_spider.storage.sqlite import SQLiteDivisionRepository, SQLitePlaceR
 
 
 MAX_PARALLEL_DMFW_WORKERS = 8
+
+
+class GracefulStopRequested(Exception):
+    """父进程请求 worker 优雅停止。"""
+
+
+def _stop_requested(stop_event) -> bool:
+    return stop_event is not None and stop_event.is_set()
+
+
+def _check_stop(stop_event):
+    if _stop_requested(stop_event):
+        raise GracefulStopRequested()
+
+
+def _init_worker_ignore_sigint():
+    """子进程忽略 Ctrl+C。
+
+    Ctrl+C 只由父进程处理。
+    否则当某个 worker 已经完成任务、回到 ProcessPoolExecutor 内部等待队列时，
+    它可能在 call_queue.get() 处被 KeyboardInterrupt 打断，导致 BrokenProcessPool。
+    """
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 
 @dataclass(slots=True)
@@ -225,7 +249,7 @@ def sync_dmfw_divisions(*, settings: Settings) -> dict[str, object]:
     }
 
 
-def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> dict[str, object]:
+def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions, stop_event=None) -> dict[str, object]:
     task_name = options.task_namespace or "single"
     task_label = f"task={task_name}"
 
@@ -432,11 +456,13 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
 
     try:
         for current_char_index, char in enumerate(normalized_chars, start=1):
+            _check_stop(stop_event)
             current_char = char
             initial_divisions = province_divisions if options.province_codes else [
                 DmfwDivision(code="", name="全国", parent_code="", level="country")
             ]
             for division in initial_divisions:
+                _check_stop(stop_event)
                 for place in _iter_collect_partition(
                     client=client,
                     keyword=char,
@@ -452,6 +478,7 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
                     division_names=division_names,
                     division_children_cache=division_children_cache,
                     progress_context=progress_context,
+                    stop_event=stop_event,
                 ):
                     deduped[place.source_id] = place
                     fetched_total += 1
@@ -463,6 +490,7 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
                             f"累计写入批次数: {flush_count}，本次写入耗时: {write_elapsed:.3f}s"
                         )
                         deduped.clear()
+                        _check_stop(stop_event)
             completed_chars = current_char_index
         
         if deduped:
@@ -553,9 +581,31 @@ def run_dmfw_chars_pipeline(*, settings: Settings, options: DmfwRunOptions) -> d
                         error_message=str(exc),
                     )
                 )
-            emit_exit_summary(status="failed", error=exc)
+            if isinstance(exc, GracefulStopRequested):
+                emit_exit_summary(status="interrupted", error=exc)
+            else:
+                emit_exit_summary(status="failed", error=exc)
         finally:
             signal.signal(signal.SIGINT, old_sigint_handler)
+        if isinstance(exc, GracefulStopRequested):
+            logger.info(f"{task_label} 抓取任务收到优雅停止请求，已完成最后写库、进度保存和 summary 输出。")
+            return {
+                "run_id": run_id,
+                "place_count": persisted_total,
+                "persisted_count": persisted_total,
+                "flush_count": flush_count,
+                "source_name": "dmfw",
+                "match_mode": options.match_mode,
+                "province_codes": [division.code for division in province_divisions],
+                "exported_files": {},
+                "task_json": options.json_path,
+                "task_namespace": options.task_namespace,
+                "write_run_db": options.write_run_db,
+                "write_total_db": options.write_total_db,
+                "total_db_path": str(total_db_path) if total_db_path is not None else None,
+                "status": "interrupted",
+                "error_type": type(exc).__name__,
+            }
         if isinstance(exc, KeyboardInterrupt):
             logger.info(f"{task_label} 抓取任务收到 Ctrl+C，已完成最后写库、进度保存和 summary 输出。")
         else:
@@ -589,66 +639,168 @@ def run_dmfw_parallel_tasks(*, settings: Settings, task_options: list[DmfwRunOpt
     SQLiteTotalPlaceRepository(total_db_path).initialize()
 
     effective_workers = min(max(1, workers), len(task_options), MAX_PARALLEL_DMFW_WORKERS)
-    future_map: dict[object, DmfwRunOptions] = {}
+    manager = mp.Manager()
+    stop_event = manager.Event()
+    ctx = mp.get_context("spawn")
+    future_to_task: dict[object, DmfwRunOptions] = {}
     results: list[dict[str, object]] = []
+    finished_task_namespaces: set[str] = set()
+    interrupted = False
 
-    with ProcessPoolExecutor(max_workers=effective_workers) as executor:
+    with ProcessPoolExecutor(
+        max_workers=effective_workers,
+        mp_context=ctx,
+        initializer=_init_worker_ignore_sigint,
+    ) as executor:
         for option in task_options:
+            task_namespace = _build_task_namespace(option)
             future = executor.submit(
                 _run_dmfw_parallel_task_worker,
                 settings,
                 option,
-                _build_task_namespace(option),
+                task_namespace,
+                stop_event,
             )
-            future_map[future] = option
+            future_to_task[future] = option
+
         try:
-            for future in as_completed(list(future_map)):
-                results.append(future.result())
-        except KeyboardInterrupt:
-            print("[PARALLEL_INTERRUPT] Ctrl+C received; waiting workers to flush final batches and summaries...", flush=True)
-            old_sigint_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
-            try:
-                for future in as_completed(list(future_map)):
-                    option = future_map[future]
-                    task_namespace = _build_task_namespace(option)
+            pending = set(future_to_task.keys())
+
+            while pending:
+                done, pending = wait(
+                    pending,
+                    timeout=1,
+                    return_when=FIRST_COMPLETED,
+                )
+
+                for future in done:
+                    task = future_to_task[future]
+                    task_name = _build_task_namespace(task)
+
                     try:
-                        results.append(future.result())
-                        print(f"[PARALLEL_WORKER_FINISHED] task={task_namespace} status=success", flush=True)
-                    except BaseException as worker_exc:
+                        result = future.result()
+                    except Exception as exc:
                         print(
-                            f"[PARALLEL_WORKER_FINISHED] task={task_namespace} "
-                            f"status=failed error_type={type(worker_exc).__name__}",
+                            f"[PARALLEL_WORKER_FINISHED] task={task_name} "
+                            f"status=failed error_type={type(exc).__name__}",
                             flush=True,
                         )
-            finally:
-                signal.signal(signal.SIGINT, old_sigint_handler)
+                        continue
 
-            print("[PARALLEL_INTERRUPT_DONE] all active workers finished final flush and summaries.", flush=True)
+                    result_task_name = (
+                        result.get("task_namespace")
+                        or result.get("task")
+                        or task_name
+                    )
 
-            return {
-                "mode": "parallel",
-                "interrupted": True,
-                "task_count": len(task_options),
-                "workers": effective_workers,
-                "max_supported_workers": MAX_PARALLEL_DMFW_WORKERS,
-                "total_db_path": str(total_db_path),
-                "tasks": sorted(results, key=lambda item: str(item.get("task_json") or "")),
+                    if result_task_name not in finished_task_namespaces:
+                        results.append(result)
+                        finished_task_namespaces.add(result_task_name)
+
+                    status = result.get("status", "success")
+                    print(
+                        f"[PARALLEL_WORKER_FINISHED] task={result_task_name} status={status}",
+                        flush=True,
+                    )
+
+        except KeyboardInterrupt:
+            interrupted = True
+            print(
+                "[PARALLEL_INTERRUPT] Ctrl+C received; "
+                "asking workers to flush final batches and summaries...",
+                flush=True,
+            )
+
+            stop_event.set()
+
+            pending = {
+                future
+                for future in future_to_task
+                if not future.done()
             }
+
+            try:
+                while pending:
+                    done, pending = wait(
+                        pending,
+                        timeout=1,
+                        return_when=FIRST_COMPLETED,
+                    )
+
+                    for future in done:
+                        task = future_to_task[future]
+                        task_name = _build_task_namespace(task)
+
+                        try:
+                            result = future.result()
+                        except Exception as exc:
+                            print(
+                                f"[PARALLEL_WORKER_FINISHED] task={task_name} "
+                                f"status=failed error_type={type(exc).__name__}",
+                                flush=True,
+                            )
+                            continue
+
+                        result_task_name = (
+                            result.get("task_namespace")
+                            or result.get("task")
+                            or task_name
+                        )
+
+                        if result_task_name not in finished_task_namespaces:
+                            results.append(result)
+                            finished_task_namespaces.add(result_task_name)
+
+                        status = result.get("status", "interrupted")
+                        error_type = result.get("error_type")
+
+                        if error_type:
+                            print(
+                                f"[PARALLEL_WORKER_FINISHED] task={result_task_name} "
+                                f"status={status} error_type={error_type}",
+                                flush=True,
+                            )
+                        else:
+                            print(
+                                f"[PARALLEL_WORKER_FINISHED] task={result_task_name} "
+                                f"status={status}",
+                                flush=True,
+                            )
+
+            except KeyboardInterrupt:
+                print(
+                    "[PARALLEL_FORCE_EXIT] second Ctrl+C received; "
+                    "workers may not finish final flush.",
+                    flush=True,
+                )
+                raise
+
+        finally:
+            if interrupted:
+                print(
+                    "[PARALLEL_INTERRUPT_DONE] all active workers finished final flush and summaries.",
+                    flush=True,
+                )
 
     total_repository = SQLiteTotalPlaceRepository(total_db_path)
     total_repository.initialize()
     persisted_total = total_repository.count_places()
     db_only_export = set(export_formats) == {"db"}
     stored_places = [] if db_only_export else total_repository.list_places()
-    exported = export_dmfw_places(
-        records=stored_places,
-        export_dir=settings.export_dir,
-        sqlite_path=total_db_path,
-        formats=export_formats,
+    exported = (
+        {}
+        if interrupted
+        else export_dmfw_places(
+            records=stored_places,
+            export_dir=settings.export_dir,
+            sqlite_path=total_db_path,
+            formats=export_formats,
+        )
     )
 
     return {
         "mode": "parallel",
+        "interrupted": interrupted,
         "task_count": len(task_options),
         "workers": effective_workers,
         "max_supported_workers": MAX_PARALLEL_DMFW_WORKERS,
@@ -660,7 +812,7 @@ def run_dmfw_parallel_tasks(*, settings: Settings, task_options: list[DmfwRunOpt
     }
 
 
-def _run_dmfw_parallel_task_worker(settings: Settings, options: DmfwRunOptions, task_namespace: str) -> dict[str, object]:
+def _run_dmfw_parallel_task_worker(settings: Settings, options: DmfwRunOptions, task_namespace: str, stop_event=None) -> dict[str, object]:
     worker_settings = replace(settings, raw_dir=settings.raw_dir / task_namespace)
     worker_options = replace(
         options,
@@ -675,7 +827,7 @@ def _run_dmfw_parallel_task_worker(settings: Settings, options: DmfwRunOptions, 
         force=True,
     )
     print(f"[WORKER_START] pid={os.getpid()} task={task_namespace}", flush=True)
-    return run_dmfw_chars_pipeline(settings=worker_settings, options=worker_options)
+    return run_dmfw_chars_pipeline(settings=worker_settings, options=worker_options, stop_event=stop_event)
 
 
 def _build_dmfw_api_client(settings: Settings) -> DmfwApiClient:
@@ -792,6 +944,7 @@ def _iter_collect_partition(
     division_names: dict[str, str],
     division_children_cache: dict[str, list[DmfwDivision]],
     progress_context: dict[str, object] | None = None,
+    stop_event=None,
 ):
     name = division_names.get(code, code)
     if progress_context is not None:
@@ -803,6 +956,7 @@ def _iter_collect_partition(
         logger.info(f"区划 {name} ({code}) 字符 '{keyword}' 已在历史进度中完成，跳过")
         return
     _assert_runtime_budget(started_monotonic, max_runtime_seconds)
+    _check_stop(stop_event)
     first_page = client.search_places(
         keyword=keyword,
         code=code,
@@ -828,6 +982,7 @@ def _iter_collect_partition(
             for child in children:
                 division_names[child.code] = child.name
             for child in children:
+                _check_stop(stop_event)
                 yield from _iter_collect_partition(
                     client=client,
                     keyword=keyword,
@@ -843,6 +998,7 @@ def _iter_collect_partition(
                     division_names=division_names,
                     division_children_cache=division_children_cache,
                     progress_context=progress_context,
+                    stop_event=stop_event,
                 )
             progress_tracker.mark_completed(keyword, code)
             if progress_context is not None:
@@ -861,6 +1017,7 @@ def _iter_collect_partition(
 
     for page in range(2, total_pages + 1):
         _assert_runtime_budget(started_monotonic, max_runtime_seconds)
+        _check_stop(stop_event)
         payload = client.search_places(
             keyword=keyword,
             code=code,
