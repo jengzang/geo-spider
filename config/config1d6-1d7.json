@@ -1,5 +1,5 @@
 {
-    "chars": "data/chars/hanzi_1w-1w35.txt",
+    "chars": "data/chars/hanzi_1w6-1w7.txt",
     "match_mode": "contain",
     "resume": true,
     "flush_batch_size": 5000,

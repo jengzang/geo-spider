@@ -36,4 +36,5 @@ run:
 
   cli-single: python scripts/run_dmfw_chars.py --json config/config.json
 
-  cli-all: python scripts/run_dmfw_chars.py --json config/config0d7-1.json --json config/config1-1d35.json --json config/config1d35-1d7.json --json config/config1d7-2.json --json config/config2-2d4.json --json config/config2d4-3.json --worker 6
+  cli-all: python scripts/run_dmfw_chars.py --json config/config0d8-0d9.json --json config/config0d9-1.json --json config/config1-1d15.json --json config/config1d15-1d35.json --json config/config1d35-1d6.json --json config/config1d7-2.json --json config/config2-2d4.json --json config/config1d6-1d7.json --worker 8
+  
