@@ -42,6 +42,7 @@ data/processed/*
 !data/processed/.gitkeep
 data/exports/*
 !data/exports/.gitkeep
+data/id/*
 
 # SQLite and backups
 *.db
