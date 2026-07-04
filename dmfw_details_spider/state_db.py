@@ -146,7 +146,7 @@ class StateDB:
     def claim_batch(
         self, worker_id: str, batch_size: int, claim_timeout_minutes: int = 30
     ) -> list[str]:
-        """原子事务领取一批 ID（pending + retry + 超时 claimed）。"""
+        """原子事务领取一批 ID（pending + retry + failed + 超时 claimed）。"""
         from datetime import timedelta
         now = _now_iso()
 
@@ -156,17 +156,17 @@ class StateDB:
                 conn.execute("BEGIN IMMEDIATE")
                 cutoff_dt = datetime.now(timezone.utc) - timedelta(minutes=claim_timeout_minutes)
                 cutoff = cutoff_dt.isoformat()
-                # 用简单的字符串比较近似超时判断（ISO 格式可字典序比较）
-                # 直接取 pending/retry 优先，其次超时 claimed
+                # 领取优先级: pending > retry > failed > 超时 claimed
                 sql = """
                     SELECT id FROM id_tasks
-                    WHERE status IN ('pending', 'retry')
+                    WHERE status IN ('pending', 'retry', 'failed')
                        OR (status = 'claimed' AND claimed_at < ?)
                     ORDER BY
                         CASE status
                             WHEN 'pending' THEN 0
                             WHEN 'retry' THEN 1
-                            WHEN 'claimed' THEN 2
+                            WHEN 'failed' THEN 2
+                            WHEN 'claimed' THEN 3
                         END,
                         updated_at ASC
                     LIMIT ?
