@@ -65,29 +65,20 @@ GeoNode-Spider/
 │   ├── processed/             # 本地 SQLite 主库等处理结果
 │   └── exports/               # json/csv/xlsx/db 导出产物
 ├── src/
-│   ├── geonode_spider/         # 地名列表采集器（主包）
-│   └── dmfw_details_spider/    # 地名详情采集器
-│   ├── config.py              # 配置 dataclass
-│   ├── client.py              # detailsPub 接口封装
-│   ├── state_db.py            # 共享进度库（11M+ ID 状态跟踪）
-│   ├── id_pool.py             # ID 文件读写
-│   ├── output_db.py           # 输出库 + 合并逻辑
-│   ├── worker.py              # 单 worker 主循环
-│   ├── rate_limit.py          # TokenBucket 限速
-│   └── launch.py              # 多 worker 启动器（进程池）
+│   ├── geonode_spider/        # 地名列表采集器（ListPub 接口）
+│   │   ├── config/            # 配置加载
+│   │   ├── crawler/           # 请求会话、代理、限速、UA
+│   │   ├── exporters/         # 多格式导出
+│   │   ├── geo/               # 地理编码 provider
+│   │   ├── models/            # 统一数据模型
+│   │   ├── pipelines/         # 抓取流水线
+│   │   ├── services/          # 项目级编排
+│   │   ├── sources/           # 官方数据源适配器
+│   │   ├── storage/           # SQLite schema 与仓储
+│   │   └── utils/             # 通用工具
+│   └── dmfw_details_spider/   # 地名详情采集器（DetailsPub 接口）
 ├── logs/                      # 运行日志
-├── scripts/                   # 薄脚本入口
-├── src/geonode_spider/
-│   ├── config/                # 配置加载
-│   ├── crawler/               # 请求会话、代理、限速、UA
-│   ├── exporters/             # 多格式导出
-│   ├── geo/                   # 地理编码 provider
-│   ├── models/                # 统一数据模型
-│   ├── pipelines/             # 抓取流水线
-│   ├── services/              # 项目级编排
-│   ├── sources/               # 官方数据源适配器
-│   ├── storage/               # SQLite schema 与仓储
-│   └── utils/                 # 通用工具
+├── scripts/                   # 辅助脚本
 ├── tests/                     # 单元 / 集成测试
 └── workflow/                  # 项目工作流参考文档
 ```
@@ -128,27 +119,27 @@ cp config/settings.example.yaml config/settings.yaml
 ### 3. 初始化数据库
 
 ```bash
-python3 -m geonode_spider init-db
+geonode-spider init-db
 ```
 
 ### 4. 运行示例流水线
 
 ```bash
-python3 -m geonode_spider run-pipeline --source mock --export all
+geonode-spider run-pipeline --source mock --export all
 ```
 
-### 5. 运行民政部汉字集抓取
+### 5. 运行民政部汉字集抓取（ListPub 接口）
 
 先同步并缓存省级行政区 code：
 
 ```bash
-python3 -m geonode_spider sync-dmfw-divisions
+geonode-spider sync-dmfw-divisions
 ```
 
 推荐直接写入累计总库且只导出 db 的正式模式命令：
 
 ```bash
-python3 -m geonode_spider run-dmfw-chars \
+geonode-spider run-dmfw-chars \
   --chars 村 \
   --match-mode contain \
   --write-total-db \
@@ -237,23 +228,15 @@ delete_worker_db_after_merge: true
 **运行**：
 
 ```bash
-# 启动（需先 pip install -e .）
-.venv/bin/python -m dmfw_details_spider.launch --config src/dmfw_details_spider/config.example.yaml
-
-# 或使用 CLI 入口
+# 启动
 dmfw-detail --config src/dmfw_details_spider/config.example.yaml
 
 # 后台运行
-nohup .venv/bin/python -m dmfw_details_spider.launch --config src/dmfw_details_spider/config.example.yaml > logs/dmfw_details_spider/launch.log 2>&1 &
+nohup dmfw-detail --config src/dmfw_details_spider/config.example.yaml > logs/dmfw_details_spider/launch.log 2>&1 &
 
 # 查看进度
 tail -f logs/dmfw_details_spider/launch.log
-python3 -c "
-from dmfw_details_spider.state_db import StateDB
-s = StateDB('crawler_state/details_progress.sqlite')
-stats = s.get_stats()
-print(f'done={stats[\"done\"]:,}  pending={stats[\"pending\"]:,}')
-"
+dmfw-detail-status
 ```
 
 **停止**：
@@ -265,41 +248,44 @@ kill <pid>
 # 或直接 Ctrl+C（前台运行时）
 ```
 
-**状态查看**：
-
-```bash
-# 进度统计
-python3 -c "
-from dmfw_details_spider.state_db import StateDB
-s = StateDB('crawler_state/details_progress.sqlite')
-print(s.get_stats())
-"
-
-# master 库记录数
-python3 -c "
-from dmfw_details_spider.output_db import MasterDB
-print(MasterDB('crawler_output/dmfw_place_details_master.sqlite').count())
-"
-```
-
 ### 6. 查看当前配置
 
 ```bash
-python3 -m geonode_spider show-config
+geonode-spider show-config
 ```
 
 ## 常用命令
 
-### CLI 入口
+### geonode-spider（ListPub 列表采集）
 
 ```bash
+# CLI（推荐）
+geonode-spider init-db
+geonode-spider show-config
+geonode-spider sample-data
+geonode-spider export --format all
+geonode-spider run-pipeline --source mock --export all
+geonode-spider sync-dmfw-divisions
+geonode-spider run-dmfw-chars --chars 村 --match-mode contain --write-total-db --total-db-path data/processed/dmfw_places_total.db --resume
+geonode-spider run-dmfw-chars --json config/dmfw-task.example.json
+
+# 或直接用模块
 python3 -m geonode_spider init-db
-python3 -m geonode_spider show-config
-python3 -m geonode_spider sample-data
-python3 -m geonode_spider export --format all
-python3 -m geonode_spider run-pipeline --source mock --export all
-python3 -m geonode_spider run-dmfw-chars --chars 村 --match-mode contain --write-total-db --total-db-path data/processed/dmfw_places_total.db --resume
-python3 -m geonode_spider run-dmfw-chars --json config/dmfw-task.example.json
+```
+
+### dmfw-detail（DetailsPub 详情采集）
+
+```bash
+# CLI（推荐）
+dmfw-detail --config src/dmfw_details_spider/config.example.yaml
+dmfw-detail-status
+dmfw-detail --help
+
+# 后台运行
+nohup dmfw-detail --config src/dmfw_details_spider/config.example.yaml > logs/dmfw_details_spider/launch.log 2>&1 &
+
+# 或直接用模块
+python3 -m dmfw_details_spider.launch --config src/dmfw_details_spider/config.example.yaml
 ```
 
 ### 脚本入口
