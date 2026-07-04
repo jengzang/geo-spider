@@ -6,6 +6,7 @@ import argparse
 import logging
 import multiprocessing as mp
 import os
+import shutil
 import signal
 import sys
 import time
@@ -107,6 +108,7 @@ def launch(config: Config) -> int:
 
     mp_context = mp.get_context("spawn")
     total_done = 0
+    interrupted = False
 
     try:
         with ProcessPoolExecutor(
@@ -132,15 +134,15 @@ def launch(config: Config) -> int:
                     logger.error(f"[{worker_id}] 异常退出: {exc}")
 
     except KeyboardInterrupt:
-        logger.info("收到 Ctrl+C，等待 worker 优雅退出...")
-        # ProcessPoolExecutor 会在 with 块退出时自动 terminate
-        # 但 worker 内部已处理 SIGINT 做优雅退出
-        raise
+        logger.info("收到 Ctrl+C，等待 worker flush 进度...")
+        interrupted = True
+        time.sleep(3)  # 给 worker 的 SIGINT 处理器时间 flush
+        # 不 raise，继续执行 merge
 
     logger.info(f"所有 worker 结束，总计 done={total_done}")
 
-    # 合并
-    if config.merge_after_finish:
+    # 合并（正常结束或 Ctrl+C 都会执行）
+    if config.merge_after_finish or interrupted:
         logger.info("开始汇总到总库...")
         master = MasterDB(config.master_db)
         master.initialize()
@@ -157,6 +159,15 @@ def launch(config: Config) -> int:
         )
         total_in_master = master.count()
         logger.info(f"总库当前记录数: {total_in_master:,}")
+
+    # Ctrl+C 后清理 run 目录
+    if interrupted:
+        try:
+            if os.path.isdir(run_dir):
+                shutil.rmtree(run_dir, ignore_errors=True)
+                logger.info(f"已清理 run 目录: {run_dir}")
+        except Exception:
+            pass
 
     return total_done
 
