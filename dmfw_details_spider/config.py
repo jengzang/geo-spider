@@ -19,8 +19,8 @@ DEFAULTS = {
     "global_qps": 10.0,
     "per_worker_qps": 0.0,
     "request_interval": 0.0,
-    "jitter_min": 0.05,
-    "jitter_max": 0.3,
+    "jitter_min": 0.002,
+    "jitter_max": 0.01,
     "request_timeout": 10,
     "max_retries": 3,  # 保守默认，CLI 可覆盖
     "retry_base_delay": 1.0,
@@ -51,8 +51,8 @@ class Config:
     global_qps: float = 10.0
     per_worker_qps: float = 0.0
     request_interval: float = 0.0
-    jitter_min: float = 0.05
-    jitter_max: float = 0.3
+    jitter_min: float = 0.002
+    jitter_max: float = 0.01
     request_timeout: int = 10
     max_retries: int = 10
     retry_base_delay: float = 1.0
