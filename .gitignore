@@ -50,7 +50,11 @@ data/id/*
 *.sqlite3
 *.db-wal
 *.db-shm
+*.sqlite-wal
+*.sqlite-shm
 backups/
+crawler_output/
+crawler_state/
 
 # Editors and tooling
 .idea/
