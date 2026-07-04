@@ -64,7 +64,9 @@ GeoNode-Spider/
 │   ├── interim/               # 中间处理结果
 │   ├── processed/             # 本地 SQLite 主库等处理结果
 │   └── exports/               # json/csv/xlsx/db 导出产物
-├── dmfw_details_spider/       # 地名详情采集器（独立模块）
+├── src/
+│   ├── geonode_spider/         # 地名列表采集器（主包）
+│   └── dmfw_details_spider/    # 地名详情采集器
 │   ├── config.py              # 配置 dataclass
 │   ├── client.py              # detailsPub 接口封装
 │   ├── state_db.py            # 共享进度库（11M+ ID 状态跟踪）
@@ -219,7 +221,7 @@ python3 -m geonode_spider run-dmfw-chars \
 - 每 `progress_flush_interval` 条批量同步进度到共享 `state_db`
 - 退出时（正常结束 / Ctrl+C / kill）自动：flush 进度 → 合并所有 worker 库到 master → 释放未处理 claimed → 清理临时目录
 
-**配置**：编辑 `dmfw_details_spider/config.example.yaml`
+**配置**：编辑 `src/dmfw_details_spider/config.example.yaml`
 
 ```yaml
 workers: 20               # worker 进程数
@@ -235,11 +237,14 @@ delete_worker_db_after_merge: true
 **运行**：
 
 ```bash
-# 启动
-.venv/bin/python -m dmfw_details_spider.launch --config dmfw_details_spider/config.example.yaml
+# 启动（需先 pip install -e .）
+.venv/bin/python -m dmfw_details_spider.launch --config src/dmfw_details_spider/config.example.yaml
+
+# 或使用 CLI 入口
+dmfw-detail --config src/dmfw_details_spider/config.example.yaml
 
 # 后台运行
-nohup .venv/bin/python -m dmfw_details_spider.launch --config dmfw_details_spider/config.example.yaml > logs/dmfw_details_spider/launch.log 2>&1 &
+nohup .venv/bin/python -m dmfw_details_spider.launch --config src/dmfw_details_spider/config.example.yaml > logs/dmfw_details_spider/launch.log 2>&1 &
 
 # 查看进度
 tail -f logs/dmfw_details_spider/launch.log

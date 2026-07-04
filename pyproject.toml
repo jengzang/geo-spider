@@ -30,6 +30,8 @@ parser = [
 
 [project.scripts]
 geonode-spider = "geonode_spider.cli:main"
+dmfw-detail = "dmfw_details_spider.launch:main"
+dmfw-detail-status = "dmfw_details_spider.status:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

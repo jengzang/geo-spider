@@ -50,7 +50,7 @@ class DetailsApiClient:
 
     def fetch_one(self, id_value: str) -> FetchResult:
         """请求单条地名详情。"""
-        url = f"{self.base_url}/stname/detailsPub"
+        url = f"{self.base_url}/9095/stname/detailsPub"
         self._rotate_ua()
         start = time.perf_counter()
 

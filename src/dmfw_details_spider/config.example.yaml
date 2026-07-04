@@ -10,7 +10,7 @@ master_db: crawler_output/dmfw_place_details_master.sqlite
 worker_output_dir: crawler_output/workers
 
 # ---- 性能 ----
-workers: 30            # worker 进程数
+workers: 20            # worker 进程数
 per_worker_qps: 2      # 每个 worker 独立 QPS 上限
 request_timeout: 10    # 请求超时秒数
 
@@ -22,8 +22,8 @@ jitter_min: 0.002
 jitter_max: 0.01
 
 # ---- 进度 ----
-progress_flush_interval: 2000   # 每 N 条写一次共享进度库（state_db）
-output_flush_interval: 100      # 每 N 条批量写自己的输出库（减少 SQLite 写入开销）
+progress_flush_interval: 10000   # 每 N 条写一次共享进度库（state_db）
+output_flush_interval: 20      # 每 N 条批量写自己的输出库（减少 SQLite 写入开销）
 
 # ---- 运行 ----
 merge_after_finish: true
