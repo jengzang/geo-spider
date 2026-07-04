@@ -20,12 +20,16 @@ from dmfw_details_spider.state_db import StateDB
 logger = logging.getLogger(__name__)
 
 _shutdown_requested = False
+_flush_on_exit: object = None  # 退出时调用的 flush 函数，由 run_worker 设置
 
 
 def _handle_signal(signum: int, frame: object) -> None:
-    global _shutdown_requested
-    logger.info("收到退出信号，等待当前批次完成...")
-    _shutdown_requested = True
+    global _shutdown_requested, _flush_on_exit
+    if not _shutdown_requested:
+        logger.info("收到退出信号，等待当前批次完成...")
+        _shutdown_requested = True
+        if callable(_flush_on_exit):
+            _flush_on_exit()
 
 
 def _now_iso() -> str:
@@ -122,6 +126,36 @@ def run_worker(config: Config) -> int:
     processed = 0
     start_time = time.monotonic()
 
+    # 本地累积的进度更新，批量写 state_db 减少锁竞争
+    done_ids: list[str] = []
+    retry_updates: list[tuple[str, str, str]] = []
+    failed_updates: list[tuple[str, str, str]] = []
+
+    def _flush_progress() -> None:
+        """批量提交本地的进度更新到 state_db。"""
+        nonlocal done_ids, retry_updates, failed_updates
+        if done_ids:
+            state_db.bulk_mark_done(done_ids)
+            done_ids.clear()
+        if retry_updates:
+            state_db.bulk_mark_status(retry_updates)
+            retry_updates.clear()
+        if failed_updates:
+            state_db.bulk_mark_status(failed_updates)
+            failed_updates.clear()
+
+    # 退出时确保 flush
+    def _shutdown_flush() -> None:
+        if done_ids or retry_updates or failed_updates:
+            logger.info(
+                f"退出前同步进度: done={len(done_ids)} "
+                f"retry={len(retry_updates)} failed={len(failed_updates)}"
+            )
+            _flush_progress()
+
+    global _flush_on_exit
+    _flush_on_exit = _shutdown_flush
+
     while not _shutdown_requested:
         if config.sample_limit > 0 and processed >= config.sample_limit:
             logger.info(f"达到 sample_limit={config.sample_limit}，停止")
@@ -189,48 +223,40 @@ def run_worker(config: Config) -> int:
             if result is None:
                 result = FetchResult(id=id_val, ok=False, error="worker 退出中断")
 
-            # 写入临时库
+            # 写入 worker 自己的临时库
             record = _extract_record(result, attempt if not result.ok else 1, config.worker_id)
             if not config.dry_run:
                 output_db.upsert_place(record)
-            else:
-                logger.debug(f"  DRY RUN: {id_val} -> {record.get('standard_name', '?')}")
 
-            # 更新进度库
+            # 本地累积进度，不立即写 state_db
             if result.ok:
                 if not config.dry_run:
-                    state_db.mark_done(id_val)
+                    done_ids.append(id_val)
                 success += 1
             elif attempt < config.max_retries:
                 if not config.dry_run:
-                    state_db.mark_retry(id_val, result.error or "未知错误")
+                    retry_updates.append((id_val, "retry", result.error or "未知错误"))
                 failed += 1
             else:
                 if not config.dry_run:
-                    state_db.mark_failed(id_val, result.error or "超过最大重试次数")
+                    failed_updates.append((id_val, "failed", result.error or "超过最大重试次数"))
                 failed += 1
 
             # 进度日志
             if processed % 100 == 0:
                 elapsed = time.monotonic() - start_time
                 rate = processed / elapsed if elapsed > 0 else 0
-                stats = state_db.get_stats() if not config.dry_run else {}
-                done = stats.get("done", success)
-                pending = stats.get("pending", 0)
-                remaining = max(0, pending)
-                eta_sec = remaining / rate if rate > 0 else 0
-                eta_str = f"{eta_sec/3600:.1f}h" if eta_sec > 3600 else f"{eta_sec/60:.1f}m"
                 logger.info(
-                    f"进度: done={done} success={success} failed={failed} "
-                    f"rate={rate:.1f}/s ETA={eta_str}"
+                    f"进度: success={success} failed={failed} "
+                    f"率={rate:.1f}/s 本地缓冲done={len(done_ids)}"
                 )
 
-        # 批次结束，重置超时 claimed
+        # 批次结束，批量提交进度
         if not config.dry_run:
-            try:
-                state_db.claim_batch(config.worker_id, 0, config.claim_timeout_minutes)
-            except Exception:
-                pass
+            _flush_progress()
+
+    # 正常退出前 flush 剩余进度
+    _shutdown_flush()
 
     elapsed = time.monotonic() - start_time
     rate = processed / elapsed if elapsed > 0 else 0
@@ -239,6 +265,7 @@ def run_worker(config: Config) -> int:
         f"processed={processed} success={success} failed={failed} "
         f"retries={total_retries} elapsed={elapsed:.0f}s rate={rate:.1f}/s"
     )
+    _flush_on_exit = None
     return success
 
 

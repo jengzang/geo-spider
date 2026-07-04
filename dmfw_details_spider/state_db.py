@@ -251,6 +251,53 @@ class StateDB:
         _run_with_locked_retry(_mark)
 
     # ------------------------------------------------------------------
+    # 批量状态更新（减少锁竞争）
+    # ------------------------------------------------------------------
+
+    def bulk_mark_done(self, ids: list[str]) -> None:
+        """批量标记 done —— 一次事务完成。"""
+        if not ids:
+            return
+        now = _now_iso()
+
+        def _mark() -> None:
+            conn = self._connect()
+            try:
+                placeholders = ",".join("?" for _ in ids)
+                sql = f"UPDATE id_tasks SET status='done', done_at=?, updated_at=? WHERE id IN ({placeholders})"
+                conn.execute(sql, [now, now] + ids)
+                conn.commit()
+            finally:
+                conn.close()
+
+        _run_with_locked_retry(_mark)
+
+    def bulk_mark_status(self, updates: list[tuple[str, str, str]]) -> None:
+        """批量更新状态。每项: (id, status, error_text)。
+        status 为 'retry' 或 'failed'。"""
+        if not updates:
+            return
+        now = _now_iso()
+
+        def _mark() -> None:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                for id_val, status, error in updates:
+                    conn.execute(
+                        "UPDATE id_tasks SET status=?, last_error=?, updated_at=? WHERE id=?",
+                        (status, error[:500], now, str(id_val)),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        _run_with_locked_retry(_mark)
+
+    # ------------------------------------------------------------------
     # 统计
     # ------------------------------------------------------------------
 
