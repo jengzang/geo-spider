@@ -103,14 +103,13 @@ def run_worker(config: Config) -> int:
 
     client = DetailsApiClient(base_url=config.base_url, timeout=config.request_timeout)
 
-    # QPS 控制：TokenBucket 允许在 HTTP 等待期间累积 token
+    # QPS 控制：per_worker_qps 优先，其次 global_qps/workers
     if config.request_interval > 0:
         interval = config.request_interval
     elif config.per_worker_qps > 0:
         interval = 1.0 / config.per_worker_qps
     else:
-        per_qps = config.global_qps / max(1, config.workers)
-        interval = 1.0 / per_qps if per_qps > 0 else 1.0
+        interval = 1.0 / max(0.1, config.global_qps / max(1, config.workers))
     per_qps = 1.0 / interval if interval > 0 else 0
     bucket = TokenBucket(per_qps)
 
@@ -143,9 +142,22 @@ def run_worker(config: Config) -> int:
     retry_updates: list[tuple[str, str, str]] = []
     failed_updates: list[tuple[str, str, str]] = []
 
+    # 成功记录缓冲，每 100 条批量写一次自己的输出库
+    BULK_FLUSH = 100
+    ok_buffer: list[dict] = []
+
+    last_flush = time.monotonic()
+
+    def _flush_output_db() -> None:
+        """批量写成功记录到自己的输出库。"""
+        nonlocal ok_buffer
+        if ok_buffer:
+            output_db.bulk_upsert(ok_buffer)
+            ok_buffer.clear()
+
     def _flush_progress() -> None:
         """批量提交本地的进度更新到 state_db。"""
-        nonlocal done_ids, retry_updates, failed_updates
+        nonlocal done_ids, retry_updates, failed_updates, last_flush
         if done_ids:
             state_db.bulk_mark_done(done_ids)
             done_ids.clear()
@@ -155,9 +167,11 @@ def run_worker(config: Config) -> int:
         if failed_updates:
             state_db.bulk_mark_status(failed_updates)
             failed_updates.clear()
+        last_flush = time.monotonic()
 
     # 退出时确保 flush
     def _shutdown_flush() -> None:
+        _flush_output_db()
         if done_ids or retry_updates or failed_updates:
             logger.info(
                 f"退出前同步进度: done={len(done_ids)} "
@@ -209,9 +223,14 @@ def run_worker(config: Config) -> int:
                     max_delay=config.retry_max_delay,
                     status_code=result.status_code,
                 )
+                # 500 时输出响应体前 200 字符帮助排查
+                body_preview = ""
+                if result.status_code and result.status_code >= 500 and result.raw_text:
+                    body_preview = result.raw_text[:200].replace("\n", " ")
                 logger.warning(
                     f"  [{id_val}] 第{attempt}次失败: {result.error} "
                     f"status={result.status_code}, 退避 {backoff:.1f}s"
+                    f"{' body=' + body_preview if body_preview else ''}"
                 )
                 if result.status_code == 403:
                     logger.error(
@@ -227,7 +246,7 @@ def run_worker(config: Config) -> int:
         if result.ok:
             record = _extract_record(result, attempt, config.worker_id)
             if not config.dry_run:
-                output_db.upsert_place(record)
+                ok_buffer.append(record)
                 done_ids.append(id_val)
             success += 1
         elif attempt < config.max_retries:
@@ -238,6 +257,10 @@ def run_worker(config: Config) -> int:
             if not config.dry_run:
                 failed_updates.append((id_val, "failed", result.error or "超过最大重试次数"))
             failed += 1
+
+        # 每 BULK_FLUSH 条批量写一次自己的输出库
+        if len(ok_buffer) >= BULK_FLUSH:
+            _flush_output_db()
 
         # 进度日志
         if processed % 100 == 0:
@@ -252,7 +275,7 @@ def run_worker(config: Config) -> int:
         if not config.dry_run:
             total_buffered = len(done_ids) + len(retry_updates) + len(failed_updates)
             if total_buffered >= config.progress_flush_interval:
-                logger.debug(f"本地缓冲达到 {total_buffered} 条，flush 到 state_db")
+                logger.info(f"flush 进度到 state_db: done={len(done_ids)} retry={len(retry_updates)} failed={len(failed_updates)}")
                 _flush_progress()
 
     # 正常退出前 flush 剩余进度

@@ -64,6 +64,15 @@ GeoNode-Spider/
 │   ├── interim/               # 中间处理结果
 │   ├── processed/             # 本地 SQLite 主库等处理结果
 │   └── exports/               # json/csv/xlsx/db 导出产物
+├── dmfw_details_spider/       # 地名详情采集器（独立模块）
+│   ├── config.py              # 配置 dataclass
+│   ├── client.py              # detailsPub 接口封装
+│   ├── state_db.py            # 共享进度库（11M+ ID 状态跟踪）
+│   ├── id_pool.py             # ID 文件读写
+│   ├── output_db.py           # 输出库 + 合并逻辑
+│   ├── worker.py              # 单 worker 主循环
+│   ├── rate_limit.py          # TokenBucket 限速
+│   └── launch.py              # 多 worker 启动器（进程池）
 ├── logs/                      # 运行日志
 ├── scripts/                   # 薄脚本入口
 ├── src/geonode_spider/
@@ -199,6 +208,74 @@ python3 -m geonode_spider run-dmfw-chars \
 - 程序会先请求第一页读取 `total`，若结果过多会自动按行政区 `code` 递归分片；分片后每个分片内部会自动按页抓取直到该分片的最后一页
 - 当前站点的超界页行为不是报空，而是重复返回最后一页，因此项目不能依赖“翻到空页停止”，而是必须依赖第一页返回的 `total` 精确计算总页数；当前实现已经按这个方式处理
 - run 库 `dmfw_places` 会保留 `geometry_type` 与 `coordinates_json`；total 库会把单点写入 `dmfw_places_single`，把多坐标 geometry 写入 `dmfw_places_multi`
+
+### 5b. 运行地名详情采集器（dmfw_details_spider）
+
+这是独立的多进程详情采集器，逐个请求 `detailsPub` 接口获取每个地名的完整字段。
+
+**架构**：
+- 启动时把全部 pending/retry/failed ID 一次性 round-robin 均分给各 worker
+- 每个 worker 独立进程，读取自己的 ID 文件，写自己的临时 SQLite
+- 每 `progress_flush_interval` 条批量同步进度到共享 `state_db`
+- 退出时（正常结束 / Ctrl+C / kill）自动：flush 进度 → 合并所有 worker 库到 master → 释放未处理 claimed → 清理临时目录
+
+**配置**：编辑 `dmfw_details_spider/config.example.yaml`
+
+```yaml
+workers: 20               # worker 进程数
+per_worker_qps: 5         # 每个 worker 独立 QPS 上限
+request_timeout: 10       # 请求超时秒数
+max_retries: 5            # 最大重试次数
+progress_flush_interval: 2000  # 每 N 条写一次共享进度库
+merge_after_finish: true  # 退出时合并到 master
+merge_interval: 0         # 定期合并间隔秒数（0=仅退出时合并）
+delete_worker_db_after_merge: true
+```
+
+**运行**：
+
+```bash
+# 启动
+.venv/bin/python -m dmfw_details_spider.launch --config dmfw_details_spider/config.example.yaml
+
+# 后台运行
+nohup .venv/bin/python -m dmfw_details_spider.launch --config dmfw_details_spider/config.example.yaml > logs/dmfw_details_spider/launch.log 2>&1 &
+
+# 查看进度
+tail -f logs/dmfw_details_spider/launch.log
+python3 -c "
+from dmfw_details_spider.state_db import StateDB
+s = StateDB('crawler_state/details_progress.sqlite')
+stats = s.get_stats()
+print(f'done={stats[\"done\"]:,}  pending={stats[\"pending\"]:,}')
+"
+```
+
+**停止**：
+
+```bash
+# 推荐（触发完整清理：flush + merge + release）
+kill <pid>
+
+# 或直接 Ctrl+C（前台运行时）
+```
+
+**状态查看**：
+
+```bash
+# 进度统计
+python3 -c "
+from dmfw_details_spider.state_db import StateDB
+s = StateDB('crawler_state/details_progress.sqlite')
+print(s.get_stats())
+"
+
+# master 库记录数
+python3 -c "
+from dmfw_details_spider.output_db import MasterDB
+print(MasterDB('crawler_output/dmfw_place_details_master.sqlite').count())
+"
+```
 
 ### 6. 查看当前配置
 

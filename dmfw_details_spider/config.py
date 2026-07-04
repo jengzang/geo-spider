@@ -31,6 +31,7 @@ DEFAULTS = {
     "progress_flush_interval": 100000,
     "sync_ids_interval_seconds": 300,
     "merge_after_finish": False,
+    "merge_interval": 0,
     "delete_worker_db_after_merge": True,
     "dry_run": False,
     "sample_limit": 0,
@@ -64,6 +65,7 @@ class Config:
     progress_flush_interval: int = 100000
     sync_ids_interval_seconds: int = 300
     merge_after_finish: bool = False
+    merge_interval: int = 0
     delete_worker_db_after_merge: bool = True
     dry_run: bool = False
     sample_limit: int = 0

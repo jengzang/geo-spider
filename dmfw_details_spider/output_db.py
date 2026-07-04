@@ -203,6 +203,36 @@ class OutputDB:
 
         _run_with_locked_retry(_upsert)
 
+    def bulk_upsert(self, records: list[dict]) -> None:
+        """批量 upsert，单事务提交。"""
+        if not records:
+            return
+        cols = ["id"] + DETAIL_COLS
+        col_names = ",".join(cols)
+        placeholders = ",".join("?" for _ in cols)
+        set_clause = ",".join(f"{c}=excluded.{c}" for c in DETAIL_COLS)
+
+        sql = (
+            f"INSERT INTO place_details ({col_names}) VALUES ({placeholders}) "
+            f"ON CONFLICT(id) DO UPDATE SET {set_clause}"
+        )
+
+        def _bulk() -> None:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                for record in records:
+                    values = [record.get(c) for c in cols]
+                    conn.execute(sql, values)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        _run_with_locked_retry(_bulk)
+
     def count(self) -> int:
         def _count() -> int:
             conn = self._connect()

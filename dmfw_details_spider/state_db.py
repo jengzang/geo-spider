@@ -369,6 +369,58 @@ class StateDB:
 
         _run_with_locked_retry(_mark)
 
+    def sync_done_from_master(self, master_db_path: str) -> int:
+        """把 master 库中已存在的 ID 在 state_db 中标记为 done。返回同步数。"""
+        now = _now_iso()
+
+        def _sync() -> int:
+            conn = self._connect()
+            try:
+                conn.execute(f"ATTACH DATABASE ? AS master_db", (str(master_db_path),))
+                cursor = conn.execute(
+                    "UPDATE id_tasks SET status='done', done_at=?, updated_at=? "
+                    "WHERE status != 'done' "
+                    "AND id IN (SELECT id FROM master_db.place_details)",
+                    (now, now),
+                )
+                count = cursor.rowcount
+                conn.commit()
+                conn.execute("DETACH DATABASE master_db")
+                return count
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        return _run_with_locked_retry(_sync)
+
+    def fix_inconsistent_done(self, master_db_path: str) -> int:
+        """state_db done 但 master 不存在的 → 重置为 pending。返回修复数。"""
+        now = _now_iso()
+
+        def _fix() -> int:
+            conn = self._connect()
+            try:
+                conn.execute(f"ATTACH DATABASE ? AS master_db", (str(master_db_path),))
+                cursor = conn.execute(
+                    "UPDATE id_tasks SET status='pending', done_at=NULL, updated_at=? "
+                    "WHERE status='done' "
+                    "AND id NOT IN (SELECT id FROM master_db.place_details)",
+                    (now,),
+                )
+                count = cursor.rowcount
+                conn.commit()
+                conn.execute("DETACH DATABASE master_db")
+                return count
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        return _run_with_locked_retry(_fix)
+
     # ------------------------------------------------------------------
     # 统计
     # ------------------------------------------------------------------

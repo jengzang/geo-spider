@@ -1,6 +1,5 @@
 # DMFW Details Spider 配置示例
 # 用法: python -m dmfw_details_spider.launch --config dmfw_details_spider/config.example.yaml
-# CLI 参数会覆盖配置文件中的同名设置
 
 # ---- ID 池 ----
 id_files: []  # 启动时自动同步的 ID 文件列表
@@ -11,24 +10,23 @@ master_db: crawler_output/dmfw_place_details_master.sqlite
 worker_output_dir: crawler_output/workers
 
 # ---- 性能 ----
-# 注意：嵌套结构会被自动展平，所以 dmfw.workers 等价于 workers
-workers: 30          # worker 进程数（~3.3/s per worker, 30×3.3≈100）
-global_qps: 100      # 全局 QPS 上限
-batch_size: 200      # 每批领取 ID 数
-request_timeout: 10  # 请求超时秒数
+workers: 20            # worker 进程数
+per_worker_qps: 5      # 每个 worker 独立 QPS 上限
+request_timeout: 10    # 请求超时秒数
 
 # ---- 重试 ----
-max_retries: 5       # 最大重试次数
+max_retries: 5         # 最大重试次数
 retry_base_delay: 0.3
 retry_max_delay: 5.0
 jitter_min: 0.002
 jitter_max: 0.01
 
 # ---- 进度 ----
-progress_flush_interval: 2000   # 每 N 条写一次共享进度库
-claim_timeout_minutes: 30       # claimed ID 超时回收（分钟）
+progress_flush_interval: 2000   # 每 N 条写一次共享进度库（state_db）
+# merge_interval: 300           # 可选：每 N 秒合并 worker 临时库到 master（0=仅退出时合并）
 
 # ---- 运行 ----
 merge_after_finish: true
+merge_interval: 0
 delete_worker_db_after_merge: true
 log_level: INFO
