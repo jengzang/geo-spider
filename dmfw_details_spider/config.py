@@ -20,7 +20,7 @@ DEFAULTS = {
     "jitter_min": 0.05,
     "jitter_max": 0.3,
     "request_timeout": 10,
-    "max_retries": 3,
+    "max_retries": 10,
     "retry_base_delay": 1.0,
     "retry_max_delay": 60.0,
     "batch_size": 100,
@@ -51,7 +51,7 @@ class Config:
     jitter_min: float = 0.05
     jitter_max: float = 0.3
     request_timeout: int = 10
-    max_retries: int = 3
+    max_retries: int = 10
     retry_base_delay: float = 1.0
     retry_max_delay: float = 60.0
     batch_size: int = 100

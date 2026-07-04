@@ -168,12 +168,9 @@ def main() -> None:
             f"{result['json_failures']:>8}"
         )
 
-        # 判断是否应该停止
+        # 只在出现 429/403 时停止（限流/封禁），5xx 是服务器随机错误，重试即可
         if result["status_429"] > 0 or result["status_403"] > 0:
             logger.warning(f"QPS={qps}: 出现 429/403，停止继续提高")
-            stop_next = True
-        elif result["success_rate"] < 90:
-            logger.warning(f"QPS={qps}: 成功率低于 90%，停止继续提高")
             stop_next = True
 
     # 安全建议
