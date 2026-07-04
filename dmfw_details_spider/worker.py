@@ -223,14 +223,11 @@ def run_worker(config: Config) -> int:
         if result is None:
             result = FetchResult(id=id_val, ok=False, error="worker 退出中断")
 
-        # 写入 worker 自己的临时库
-        record = _extract_record(result, attempt if not result.ok else 1, config.worker_id)
-        if not config.dry_run:
-            output_db.upsert_place(record)
-
-        # 本地累积进度，不立即写 state_db
+        # 仅成功才写入输出库，失败的等重试
         if result.ok:
+            record = _extract_record(result, attempt, config.worker_id)
             if not config.dry_run:
+                output_db.upsert_place(record)
                 done_ids.append(id_val)
             success += 1
         elif attempt < config.max_retries:
