@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -68,13 +70,69 @@ class Config:
     output_db: str = ""
 
 
+def load_config_file(path: str) -> dict:
+    """从 YAML 或 JSON 文件加载配置，返回扁平 dict。
+
+    YAML 需要 PyYAML 库；JSON 内置支持。
+    """
+    ext = os.path.splitext(path)[1].lower()
+    with open(path, "r", encoding="utf-8") as f:
+        if ext in (".yaml", ".yml"):
+            try:
+                import yaml as _yaml
+            except ImportError:
+                raise ImportError("读取 YAML 配置文件需要安装 PyYAML: pip install pyyaml")
+            raw = _yaml.safe_load(f) or {}
+        else:
+            raw = json.load(f)
+
+    # 支持嵌套结构（如 dmfw.workers → workers），也支持扁平 key
+    result: dict = {}
+    _flatten_keys(raw, "", result)
+    return result
+
+
+def _flatten_keys(data: dict, prefix: str, result: dict) -> None:
+    for k, v in data.items():
+        full_key = f"{prefix}{k}" if not prefix else k
+        if isinstance(v, dict) and not any(
+            full_key == f.name for f in dataclasses.fields(Config)  # type: ignore[attr-defined]
+        ):
+            _flatten_keys(v, f"{prefix}{k}.", result)
+        else:
+            result[full_key] = v
+
+
 def build_config_from_args(args: object) -> Config:
-    """从 argparse Namespace 构建 Config，只取 Config 中存在的字段。"""
+    """从 argparse Namespace 构建 Config。
+
+    优先级：显式 CLI 参数 > 配置文件 > Config 默认值。
+    """
     config_fields = {f.name for f in dataclasses.fields(Config)}  # type: ignore[attr-defined]
-    kwargs = {}
+    kwargs: dict = {}
+
+    # 1) 配置文件覆盖 Config 默认值
+    config_path = getattr(args, "config", None)
+    if config_path:
+        file_kwargs = load_config_file(config_path)
+        for key, value in file_kwargs.items():
+            if key in config_fields:
+                kwargs[key] = value
+
+    # 2) CLI 参数 —— 仅取用户显式传入的（不等于 argparse 默认值才算）或不在 DEFAULTS 里的
     for key, value in vars(args).items():
-        if key in config_fields and value is not None:
-            kwargs[key] = value
+        if key == "config":
+            continue
+        if key not in config_fields:
+            continue
+        # 如果该 key 在 DEFAULTS 中且 value 等于默认值，说明用户没传，跳过
+        if key in DEFAULTS and value == DEFAULTS[key]:
+            continue
+        # list 默认是空列表，用户没传时跳过
+        if isinstance(value, list) and not value:
+            continue
+        kwargs[key] = value
+
     return Config(**kwargs)
 
 

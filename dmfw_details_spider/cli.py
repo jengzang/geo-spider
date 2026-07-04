@@ -10,6 +10,10 @@ from dmfw_details_spider.config import DEFAULTS
 def add_common_args(parser: argparse.ArgumentParser) -> None:
     """所有子命令共享的通用参数。"""
     parser.add_argument(
+        "--config",
+        help="YAML/JSON 配置文件路径",
+    )
+    parser.add_argument(
         "--state-db",
         default=DEFAULTS["state_db"],
         help=f"共享进度库路径 (默认: {DEFAULTS['state_db']})",
