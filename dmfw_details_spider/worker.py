@@ -251,9 +251,12 @@ def run_worker(config: Config) -> int:
                     f"率={rate:.1f}/s 本地缓冲done={len(done_ids)}"
                 )
 
-        # 批次结束，批量提交进度
+        # 批次结束，达到阈值才提交进度
         if not config.dry_run:
-            _flush_progress()
+            total_buffered = len(done_ids) + len(retry_updates) + len(failed_updates)
+            if total_buffered >= config.progress_flush_interval:
+                logger.debug(f"本地缓冲达到 {total_buffered} 条，flush 到 state_db")
+                _flush_progress()
 
     # 正常退出前 flush 剩余进度
     _shutdown_flush()

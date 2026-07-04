@@ -76,6 +76,16 @@ def launch(config: Config) -> int:
     state_db = StateDB(config.state_db)
     state_db.initialize()
 
+    # 自动同步 ID 池（增量，已存在的不影响）
+    if config.id_files:
+        from dmfw_details_spider.id_pool import iter_ids_from_files
+        logger.info(f"自动同步 ID 池: {len(config.id_files)} 个文件...")
+        result = state_db.sync_ids(iter_ids_from_files(config.id_files))
+        logger.info(
+            f"ID 池同步完成: 新增 {result['added']:,}, "
+            f"已存在 {result['existed']:,}"
+        )
+
     run_id = _generate_run_id()
     run_dir = os.path.join(config.worker_output_dir, run_id)
     os.makedirs(run_dir, exist_ok=True)
