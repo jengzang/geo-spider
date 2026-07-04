@@ -24,7 +24,7 @@ jitter_min: 0.002
 jitter_max: 0.01
 
 # ---- 进度 ----
-progress_flush_interval: 10000  # 每 N 条写一次共享进度库
+progress_flush_interval: 2000   # 每 N 条写一次共享进度库
 claim_timeout_minutes: 30       # claimed ID 超时回收（分钟）
 
 # ---- 运行 ----
