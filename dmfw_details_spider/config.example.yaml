@@ -12,8 +12,7 @@ worker_output_dir: crawler_output/workers
 
 # ---- 性能 ----
 # 注意：嵌套结构会被自动展平，所以 dmfw.workers 等价于 workers
-workers: 20          # worker 进程数
-global_qps: 100      # 全局 QPS 上限
+workers: 30          # worker 进程数（~3.3/s per worker, 30×3.3≈100）
 batch_size: 200      # 每批领取 ID 数
 request_timeout: 10  # 请求超时秒数
 

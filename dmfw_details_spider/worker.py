@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import random
 import signal
 import sys
 import time
@@ -101,7 +102,7 @@ def run_worker(config: Config) -> int:
 
     client = DetailsApiClient(base_url=config.base_url, timeout=config.request_timeout)
 
-    # QPS 控制
+    # QPS 控制：TokenBucket 允许在 HTTP 等待期间累积 token
     if config.request_interval > 0:
         interval = config.request_interval
     elif config.per_worker_qps > 0:
@@ -110,6 +111,7 @@ def run_worker(config: Config) -> int:
         per_qps = config.global_qps / max(1, config.workers)
         interval = 1.0 / per_qps if per_qps > 0 else 1.0
     per_qps = 1.0 / interval if interval > 0 else 0
+    bucket = TokenBucket(per_qps)
 
     logger.info(
         f"worker {config.worker_id} 启动: per_qps={per_qps:.2f}, "
@@ -184,11 +186,12 @@ def run_worker(config: Config) -> int:
                     break
 
                 if not config.dry_run:
-                    # QPS 控制 + jitter
+                    # QPS 控制：TokenBucket + 微量 jitter
                     if attempt == 1:
-                        jittered = apply_jitter(interval, config.jitter_min, config.jitter_max)
-                        if jittered > 0:
-                            time.sleep(jittered)
+                        wait = bucket.acquire()
+                        jitter = random.uniform(config.jitter_min, config.jitter_max)
+                        if jitter > 0:
+                            time.sleep(jitter)
 
                     result = client.fetch_one(id_val)
                 else:
