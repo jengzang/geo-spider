@@ -21,6 +21,7 @@ from dmfw_details_spider.cli import (
     add_worker_args,
 )
 from dmfw_details_spider.config import DEFAULTS, Config, build_config_from_args
+from dmfw_details_spider.id_pool import iter_ids_from_file
 from dmfw_details_spider.output_db import MasterDB, merge_run_directory
 from dmfw_details_spider.state_db import StateDB
 
@@ -63,6 +64,7 @@ def _worker_entry(
     worker_db = os.path.join(run_dir, f"{worker_id}.sqlite")
     cfg.output_db = worker_db
     cfg.worker_id = worker_id
+    cfg.id_file = config_dict.get("id_file", "")
 
     # 计算 per_worker_qps
     if cfg.request_interval <= 0 and cfg.per_worker_qps <= 0:
@@ -98,7 +100,40 @@ def launch(config: Config) -> int:
         f"batch_size={config.batch_size}"
     )
 
-    # 准备传给 worker 的配置 dict
+    # ---- 第1步: 崩溃恢复 + 分配 ID ----
+    logger.info("分配 ID 给各 worker...")
+    released = state_db.release_all_claimed()
+    if released > 0:
+        logger.info(f"  崩溃恢复: 释放 {released:,} 条 claimed → pending")
+
+    worker_id_files: list[tuple[str, str]] = []
+    worker_fps = []
+    worker_counts = [0] * n_workers
+
+    for i in range(n_workers):
+        worker_id = f"worker_{i + 1:03d}"
+        filepath = os.path.join(run_dir, f"{worker_id}_ids.txt")
+        fp = open(filepath, "w", encoding="utf-8")
+        worker_id_files.append((worker_id, filepath))
+        worker_fps.append(fp)
+
+    try:
+        for idx, id_val in enumerate(state_db.iter_claimable_ids()):
+            wi = idx % n_workers
+            worker_fps[wi].write(id_val + "\n")
+            worker_counts[wi] += 1
+    finally:
+        for fp in worker_fps:
+            fp.close()
+
+    for i, (worker_id, filepath) in enumerate(worker_id_files):
+        logger.info(f"  {worker_id}: {worker_counts[i]:,} IDs")
+
+    total_claimable = sum(worker_counts)
+    logger.info(f"可领取 ID 总数: {total_claimable:,}")
+
+    # ---- 第2步: 准备配置，启动 worker ----
+    # ID 文件本身就是分配记录，无需在 state_db 中标记 claimed
     config_dict = {
         k: getattr(config, k)
         for k in Config.__slots__  # type: ignore[attr-defined]
@@ -118,9 +153,14 @@ def launch(config: Config) -> int:
         ) as executor:
             futures = {}
             for i in range(n_workers):
-                worker_id = f"worker_{i + 1:03d}"
+                worker_id = worker_id_files[i][0]
+                id_file = worker_id_files[i][1]
+                if worker_counts[i] == 0:
+                    logger.info(f"  [{worker_id}] 无 ID 可处理，跳过")
+                    continue
                 worker_config = dict(config_dict)
                 worker_config["worker_id"] = worker_id
+                worker_config["id_file"] = id_file
                 fut = executor.submit(_worker_entry, worker_id, worker_config)
                 futures[fut] = worker_id
 
@@ -136,12 +176,19 @@ def launch(config: Config) -> int:
     except KeyboardInterrupt:
         logger.info("收到 Ctrl+C，等待 worker flush 进度...")
         interrupted = True
-        time.sleep(3)  # 给 worker 的 SIGINT 处理器时间 flush
+        time.sleep(3)
         # 不 raise，继续执行 merge
 
     logger.info(f"所有 worker 结束，总计 done={total_done}")
 
-    # 合并（正常结束或 Ctrl+C 都会执行）
+    # ---- 第3步: 释放未处理的 claimed + 合并 ----
+    try:
+        released = state_db.release_all_claimed()
+        if released > 0:
+            logger.info(f"释放 {released:,} 条未处理 claimed → pending")
+    except Exception as e:
+        logger.error(f"释放失败: {e}")
+
     if config.merge_after_finish or interrupted:
         logger.info("开始汇总到总库...")
         master = MasterDB(config.master_db)
@@ -160,14 +207,26 @@ def launch(config: Config) -> int:
         total_in_master = master.count()
         logger.info(f"总库当前记录数: {total_in_master:,}")
 
-    # Ctrl+C 后清理 run 目录
-    if interrupted:
-        try:
-            if os.path.isdir(run_dir):
-                shutil.rmtree(run_dir, ignore_errors=True)
-                logger.info(f"已清理 run 目录: {run_dir}")
-        except Exception:
-            pass
+    # 退出前同步进度摘要
+    try:
+        stats = state_db.get_stats()
+        logger.info(
+            f"进度摘要: total={stats['total']:,} done={stats['done']:,} "
+            f"pending={stats['pending']:,} retry={stats['retry']:,} "
+            f"failed={stats['failed']:,} claimed={stats['claimed']:,}"
+        )
+        done_pct = stats['done'] / stats['total'] * 100 if stats['total'] > 0 else 0
+        logger.info(f"完成率: {done_pct:.2f}%")
+    except Exception:
+        pass
+
+    # 清理 run 目录（合并后不再需要）
+    try:
+        if os.path.isdir(run_dir):
+            shutil.rmtree(run_dir, ignore_errors=True)
+            logger.info(f"已清理 run 目录: {run_dir}")
+    except Exception:
+        pass
 
     return total_done
 

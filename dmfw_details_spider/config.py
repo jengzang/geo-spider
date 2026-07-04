@@ -10,6 +10,7 @@ from pathlib import Path
 
 DEFAULTS = {
     "id_files": [],
+    "id_file": "",
     "state_db": "crawler_state/details_progress.sqlite",
     "master_db": "crawler_output/dmfw_place_details_master.sqlite",
     "worker_output_dir": "crawler_output/workers",
@@ -27,7 +28,7 @@ DEFAULTS = {
     "retry_max_delay": 60.0,
     "batch_size": 100,
     "claim_timeout_minutes": 30,
-    "progress_flush_interval": 2000,
+    "progress_flush_interval": 100000,
     "sync_ids_interval_seconds": 300,
     "merge_after_finish": False,
     "delete_worker_db_after_merge": True,
@@ -42,6 +43,7 @@ DEFAULTS = {
 @dataclass(slots=True)
 class Config:
     id_files: list[str] = field(default_factory=list)
+    id_file: str = ""
     state_db: str = "crawler_state/details_progress.sqlite"
     master_db: str = "crawler_output/dmfw_place_details_master.sqlite"
     worker_output_dir: str = "crawler_output/workers"
@@ -59,7 +61,7 @@ class Config:
     retry_max_delay: float = 60.0
     batch_size: int = 100
     claim_timeout_minutes: int = 30
-    progress_flush_interval: int = 2000
+    progress_flush_interval: int = 100000
     sync_ids_interval_seconds: int = 300
     merge_after_finish: bool = False
     delete_worker_db_after_merge: bool = True

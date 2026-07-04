@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from dmfw_details_spider.cli import add_common_args, add_id_file_args, add_worker_args, add_run_args
 from dmfw_details_spider.config import DEFAULTS, Config, build_config_from_args
 from dmfw_details_spider.client import DetailsApiClient, FetchResult
+from dmfw_details_spider.id_pool import iter_ids_from_file, count_lines_in_file
 from dmfw_details_spider.output_db import OutputDB
 from dmfw_details_spider.rate_limit import TokenBucket, apply_jitter, calculate_backoff, should_retry
 from dmfw_details_spider.state_db import StateDB
@@ -113,10 +114,19 @@ def run_worker(config: Config) -> int:
     per_qps = 1.0 / interval if interval > 0 else 0
     bucket = TokenBucket(per_qps)
 
+    # 读取 worker 专属 ID 文件
+    id_file = getattr(config, "id_file", "")
+    if not id_file or not os.path.isfile(id_file):
+        logger.warning(f"worker {config.worker_id}: 无 ID 文件，退出")
+        return 0
+
+    try:
+        total_ids = count_lines_in_file(id_file)
+    except Exception:
+        total_ids = 0
     logger.info(
-        f"worker {config.worker_id} 启动: per_qps={per_qps:.2f}, "
-        f"batch_size={config.batch_size}, timeout={config.request_timeout}s, "
-        f"max_retries={config.max_retries}"
+        f"worker {config.worker_id} 启动: {total_ids:,} IDs, per_qps={per_qps:.2f}, "
+        f"timeout={config.request_timeout}s, max_retries={config.max_retries}"
     )
 
     if config.dry_run:
@@ -158,103 +168,90 @@ def run_worker(config: Config) -> int:
     global _flush_on_exit
     _flush_on_exit = _shutdown_flush
 
-    while not _shutdown_requested:
+    for id_val in iter_ids_from_file(id_file):
+        if _shutdown_requested:
+            break
         if config.sample_limit > 0 and processed >= config.sample_limit:
             logger.info(f"达到 sample_limit={config.sample_limit}，停止")
             break
+        processed += 1
 
-        batch_ids = state_db.claim_batch(
-            config.worker_id, config.batch_size, config.claim_timeout_minutes
-        )
-        if not batch_ids:
-            logger.info("无更多可领取任务，worker 退出")
-            break
-
-        logger.debug(f"领取 {len(batch_ids)} 个 ID")
-
-        for id_val in batch_ids:
+        # 请求 + 重试
+        result = None
+        for attempt in range(1, config.max_retries + 1):
             if _shutdown_requested:
                 break
-            if config.sample_limit > 0 and processed >= config.sample_limit:
-                break
-            processed += 1
 
-            # 请求 + 重试
-            result = None
-            for attempt in range(1, config.max_retries + 1):
-                if _shutdown_requested:
-                    break
-
-                if not config.dry_run:
-                    # QPS 控制：TokenBucket + 微量 jitter
-                    if attempt == 1:
-                        wait = bucket.acquire()
-                        jitter = random.uniform(config.jitter_min, config.jitter_max)
-                        if jitter > 0:
-                            time.sleep(jitter)
-
-                    result = client.fetch_one(id_val)
-                else:
-                    result = FetchResult(
-                        id=id_val, ok=True, status_code=200,
-                        data={"id": id_val, "standard_name": f"dry_run_{id_val}"},
-                        raw_text='{"id": "' + id_val + '"}', elapsed_ms=0,
-                    )
-
-                if result.ok:
-                    break
-
-                total_retries += 1
-                if attempt < config.max_retries and should_retry(result.status_code, result.error):
-                    backoff = calculate_backoff(
-                        attempt,
-                        base_delay=config.retry_base_delay,
-                        max_delay=config.retry_max_delay,
-                        status_code=result.status_code,
-                    )
-                    logger.warning(
-                        f"  [{id_val}] 第{attempt}次失败: {result.error} "
-                        f"status={result.status_code}, 退避 {backoff:.1f}s"
-                    )
-                    if result.status_code == 403:
-                        logger.error(
-                            f"  [{id_val}] 403 Forbidden —— 显著降速 30s，"
-                            "避免反复冲击"
-                        )
-                    time.sleep(backoff)
-
-            if result is None:
-                result = FetchResult(id=id_val, ok=False, error="worker 退出中断")
-
-            # 写入 worker 自己的临时库
-            record = _extract_record(result, attempt if not result.ok else 1, config.worker_id)
             if not config.dry_run:
-                output_db.upsert_place(record)
+                # QPS 控制：TokenBucket + 微量 jitter
+                if attempt == 1:
+                    wait = bucket.acquire()
+                    jitter = random.uniform(config.jitter_min, config.jitter_max)
+                    if jitter > 0:
+                        time.sleep(jitter)
 
-            # 本地累积进度，不立即写 state_db
-            if result.ok:
-                if not config.dry_run:
-                    done_ids.append(id_val)
-                success += 1
-            elif attempt < config.max_retries:
-                if not config.dry_run:
-                    retry_updates.append((id_val, "retry", result.error or "未知错误"))
-                failed += 1
+                result = client.fetch_one(id_val)
             else:
-                if not config.dry_run:
-                    failed_updates.append((id_val, "failed", result.error or "超过最大重试次数"))
-                failed += 1
-
-            # 进度日志
-            if processed % 100 == 0:
-                elapsed = time.monotonic() - start_time
-                rate = processed / elapsed if elapsed > 0 else 0
-                logger.info(
-                    f"进度: success={success} failed={failed} "
-                    f"率={rate:.1f}/s 本地缓冲done={len(done_ids)}"
+                result = FetchResult(
+                    id=id_val, ok=True, status_code=200,
+                    data={"id": id_val, "standard_name": f"dry_run_{id_val}"},
+                    raw_text='{"id": "' + id_val + '"}', elapsed_ms=0,
                 )
 
-        # 批次结束，达到阈值才提交进度
+            if result.ok:
+                break
+
+            total_retries += 1
+            if attempt < config.max_retries and should_retry(result.status_code, result.error):
+                backoff = calculate_backoff(
+                    attempt,
+                    base_delay=config.retry_base_delay,
+                    max_delay=config.retry_max_delay,
+                    status_code=result.status_code,
+                )
+                logger.warning(
+                    f"  [{id_val}] 第{attempt}次失败: {result.error} "
+                    f"status={result.status_code}, 退避 {backoff:.1f}s"
+                )
+                if result.status_code == 403:
+                    logger.error(
+                        f"  [{id_val}] 403 Forbidden —— 显著降速 30s，"
+                        "避免反复冲击"
+                    )
+                time.sleep(backoff)
+
+        if result is None:
+            result = FetchResult(id=id_val, ok=False, error="worker 退出中断")
+
+        # 写入 worker 自己的临时库
+        record = _extract_record(result, attempt if not result.ok else 1, config.worker_id)
+        if not config.dry_run:
+            output_db.upsert_place(record)
+
+        # 本地累积进度，不立即写 state_db
+        if result.ok:
+            if not config.dry_run:
+                done_ids.append(id_val)
+            success += 1
+        elif attempt < config.max_retries:
+            if not config.dry_run:
+                retry_updates.append((id_val, "retry", result.error or "未知错误"))
+            failed += 1
+        else:
+            if not config.dry_run:
+                failed_updates.append((id_val, "failed", result.error or "超过最大重试次数"))
+            failed += 1
+
+        # 进度日志
+        if processed % 100 == 0:
+            elapsed = time.monotonic() - start_time
+            rate = processed / elapsed if elapsed > 0 else 0
+            logger.info(
+                f"进度: success={success} failed={failed} "
+                f"率={rate:.1f}/s 本地缓冲done={len(done_ids)}"
+            )
+
+        # 达到阈值才提交进度
         if not config.dry_run:
             total_buffered = len(done_ids) + len(retry_updates) + len(failed_updates)
             if total_buffered >= config.progress_flush_interval:

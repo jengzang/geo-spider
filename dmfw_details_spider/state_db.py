@@ -199,6 +199,78 @@ class StateDB:
         return _run_with_locked_retry(_claim)
 
     # ------------------------------------------------------------------
+    # 一次性分配（启动时用）
+    # ------------------------------------------------------------------
+
+    def iter_claimable_ids(self) -> object:
+        """流式返回所有可领取 ID（pending/retry/failed），按优先级排序。
+
+        生成器持有连接，调用方迭代完自动关闭。
+        """
+        conn = self._connect()
+        sql = """SELECT id FROM id_tasks
+                 WHERE status IN ('pending', 'retry', 'failed')
+                 ORDER BY CASE status
+                     WHEN 'pending' THEN 0
+                     WHEN 'retry' THEN 1
+                     WHEN 'failed' THEN 2
+                 END, updated_at ASC"""
+        try:
+            for row in conn.execute(sql):
+                yield row["id"]
+        finally:
+            conn.close()
+
+    def bulk_claim(self, worker_id: str, ids: list[str]) -> None:
+        """原子事务把一批 ID 标记为 claimed。"""
+        if not ids:
+            return
+        now = _now_iso()
+
+        def _claim() -> None:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.executemany(
+                    "UPDATE id_tasks SET status='claimed', claimed_by=?, "
+                    "claimed_at=?, attempts=attempts+1, updated_at=? "
+                    "WHERE id=?",
+                    [(worker_id, now, now, id_val) for id_val in ids],
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        _run_with_locked_retry(_claim)
+
+    def release_all_claimed(self) -> int:
+        """所有 claimed → pending。用于崩溃恢复和退出释放。返回释放数。"""
+        now = _now_iso()
+
+        def _release() -> int:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                cursor = conn.execute(
+                    "UPDATE id_tasks SET status='pending', claimed_by=NULL, "
+                    "claimed_at=NULL, updated_at=? WHERE status='claimed'",
+                    (now,),
+                )
+                count = cursor.rowcount
+                conn.commit()
+                return count
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        return _run_with_locked_retry(_release)
+
+    # ------------------------------------------------------------------
     # 状态更新
     # ------------------------------------------------------------------
 
