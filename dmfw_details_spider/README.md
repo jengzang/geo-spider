@@ -126,7 +126,7 @@ python3 -m dmfw_details_spider.merge_outputs \
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--workers` | 1 | worker 数量 |
-| `--global-qps` | 5 | 全局 QPS 上限 |
+| `--global-qps` | 2 | 全局 QPS 上限 |
 | `--request-interval` | 0 | 每请求间隔秒（优先级高于 QPS 自动计算） |
 | `--jitter-min / --jitter-max` | 0.05 / 0.3 | 请求间隔随机抖动 |
 | `--request-timeout` | 10 | 请求超时秒数 |
@@ -148,7 +148,7 @@ python3 -m dmfw_details_spider.merge_outputs \
 
 ## 注意事项
 
-- 默认 QPS=5 非常保守，通过 calibrate 探测后再提高
+- 默认 QPS=2。探测结果显示 QPS>2 开始出现 5xx，请勿设置过高
 - 遇到 429/403 自动退避降速，请勿绕过
 - Worker 临时库汇总前不要删除
 - 总库只累加，不删除
