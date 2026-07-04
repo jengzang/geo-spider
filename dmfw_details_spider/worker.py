@@ -142,8 +142,7 @@ def run_worker(config: Config) -> int:
     retry_updates: list[tuple[str, str, str]] = []
     failed_updates: list[tuple[str, str, str]] = []
 
-    # 成功记录缓冲，每 100 条批量写一次自己的输出库
-    BULK_FLUSH = 100
+    # 成功记录缓冲，批量写自己的输出库
     ok_buffer: list[dict] = []
 
     last_flush = time.monotonic()
@@ -258,8 +257,8 @@ def run_worker(config: Config) -> int:
                 failed_updates.append((id_val, "failed", result.error or "超过最大重试次数"))
             failed += 1
 
-        # 每 BULK_FLUSH 条批量写一次自己的输出库
-        if len(ok_buffer) >= BULK_FLUSH:
+        # 批量写自己的输出库
+        if len(ok_buffer) >= config.output_flush_interval:
             _flush_output_db()
 
         # 进度日志

@@ -257,6 +257,10 @@ def launch(config: Config) -> int:
             synced = state_db.sync_done_from_master(master.db_path)
             if synced > 0:
                 logger.info(f"同步 state_db done: {synced:,} 条")
+            # 用实际合并数作为本次运行成果（中断时 total_done 可能为 0）
+            merged_done = result['total_read']
+            if merged_done > total_done:
+                total_done = merged_done
 
     # 退出前同步进度摘要
     try:

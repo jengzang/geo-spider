@@ -28,7 +28,8 @@ DEFAULTS = {
     "retry_max_delay": 60.0,
     "batch_size": 100,
     "claim_timeout_minutes": 30,
-    "progress_flush_interval": 100000,
+    "progress_flush_interval": 2000,
+    "output_flush_interval": 100,
     "sync_ids_interval_seconds": 300,
     "merge_after_finish": False,
     "merge_interval": 0,
@@ -62,7 +63,8 @@ class Config:
     retry_max_delay: float = 60.0
     batch_size: int = 100
     claim_timeout_minutes: int = 30
-    progress_flush_interval: int = 100000
+    progress_flush_interval: int = 2000
+    output_flush_interval: int = 100
     sync_ids_interval_seconds: int = 300
     merge_after_finish: bool = False
     merge_interval: int = 0
