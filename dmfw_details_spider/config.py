@@ -14,7 +14,7 @@ DEFAULTS = {
     "logs_dir": "logs/dmfw_details_spider",
     "workers": 1,
     "worker_id": "worker_001",
-    "global_qps": 2.0,
+    "global_qps": 10.0,
     "per_worker_qps": 0.0,
     "request_interval": 0.0,
     "jitter_min": 0.05,
@@ -45,7 +45,7 @@ class Config:
     logs_dir: str = "logs/dmfw_details_spider"
     workers: int = 1
     worker_id: str = "worker_001"
-    global_qps: float = 2.0
+    global_qps: float = 10.0
     per_worker_qps: float = 0.0
     request_interval: float = 0.0
     jitter_min: float = 0.05
