@@ -20,14 +20,14 @@ DEFAULTS = {
     "jitter_min": 0.05,
     "jitter_max": 0.3,
     "request_timeout": 10,
-    "max_retries": 10,
+    "max_retries": 3,  # 保守默认，CLI 可覆盖
     "retry_base_delay": 1.0,
     "retry_max_delay": 60.0,
     "batch_size": 100,
     "claim_timeout_minutes": 30,
     "sync_ids_interval_seconds": 300,
     "merge_after_finish": False,
-    "delete_worker_db_after_merge": False,
+    "delete_worker_db_after_merge": True,
     "dry_run": False,
     "sample_limit": 0,
     "base_url": "https://dmfw.mca.gov.cn",
@@ -58,7 +58,7 @@ class Config:
     claim_timeout_minutes: int = 30
     sync_ids_interval_seconds: int = 300
     merge_after_finish: bool = False
-    delete_worker_db_after_merge: bool = False
+    delete_worker_db_after_merge: bool = True
     dry_run: bool = False
     sample_limit: int = 0
     base_url: str = "https://dmfw.mca.gov.cn"
