@@ -12,7 +12,7 @@ from dotenv import dotenv_values
 DEFAULTS: dict[str, Any] = {
     "env": "development",
     "log_level": "INFO",
-    "sqlite_path": "data/processed/dmfw_places_spider.db",
+    "sqlite_path": "data/processed/geonode_spider.db",
     "export_dir": "data/exports",
     "raw_dir": "data/raw",
     "interim_dir": "data/interim",
@@ -39,7 +39,7 @@ DEFAULTS: dict[str, Any] = {
 class Settings:
     env: str = "development"
     log_level: str = "INFO"
-    sqlite_path: Path = Path("data/processed/dmfw_places_spider.db")
+    sqlite_path: Path = Path("data/processed/geonode_spider.db")
     export_dir: Path = Path("data/exports")
     raw_dir: Path = Path("data/raw")
     interim_dir: Path = Path("data/interim")
