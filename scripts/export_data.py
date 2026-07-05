@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 
-from geonode_spider.cli import main
+from dmfw_places_spider.cli import main
 
 
 if __name__ == "__main__":

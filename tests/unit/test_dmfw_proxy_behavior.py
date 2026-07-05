@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import requests
 
-from geonode_spider.crawler.profile import RequestProfile
-from geonode_spider.crawler.session import SpiderSession
-from geonode_spider.services.dmfw import DmfwApiClient
+from dmfw_places_spider.crawler.profile import RequestProfile
+from dmfw_places_spider.crawler.session import SpiderSession
+from dmfw_places_spider.services.dmfw import DmfwApiClient
 
 
 def _build_session() -> SpiderSession:

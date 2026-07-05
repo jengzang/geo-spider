@@ -4,10 +4,10 @@ import json
 import sqlite3
 from pathlib import Path
 
-from geonode_spider.config.settings import Settings
-from geonode_spider.services.bootstrap import ensure_runtime_directories, run_sample_pipeline
-from geonode_spider.services.dmfw import DmfwRunOptions, run_dmfw_chars_pipeline
-from geonode_spider.storage.sqlite import SQLitePlaceRepository
+from dmfw_places_spider.config.settings import Settings
+from dmfw_places_spider.services.bootstrap import ensure_runtime_directories, run_sample_pipeline
+from dmfw_places_spider.services.dmfw import DmfwRunOptions, run_dmfw_chars_pipeline
+from dmfw_places_spider.storage.sqlite import SQLitePlaceRepository
 
 
 class _FakeDmfwClient:
@@ -45,7 +45,7 @@ def test_sample_pipeline_persists_and_exports_all_formats(tmp_path: Path) -> Non
     settings = Settings(
         env="test",
         log_level="INFO",
-        sqlite_path=tmp_path / "processed" / "geonode_spider.db",
+        sqlite_path=tmp_path / "processed" / "dmfw_places_spider.db",
         export_dir=tmp_path / "exports",
         raw_dir=tmp_path / "raw",
         interim_dir=tmp_path / "interim",
@@ -83,7 +83,7 @@ def test_dmfw_db_only_export_skips_full_list_but_preserves_counts(monkeypatch, t
     settings = Settings(
         env="test",
         log_level="INFO",
-        sqlite_path=tmp_path / "processed" / "geonode_spider.db",
+        sqlite_path=tmp_path / "processed" / "dmfw_places_spider.db",
         export_dir=tmp_path / "exports",
         raw_dir=tmp_path / "raw",
         interim_dir=tmp_path / "interim",
@@ -105,12 +105,12 @@ def test_dmfw_db_only_export_skips_full_list_but_preserves_counts(monkeypatch, t
     ensure_runtime_directories(settings)
 
     fake_client = _FakeDmfwClient()
-    monkeypatch.setattr("geonode_spider.services.dmfw.DmfwApiClient", lambda *args, **kwargs: fake_client)
+    monkeypatch.setattr("dmfw_places_spider.services.dmfw.DmfwApiClient", lambda *args, **kwargs: fake_client)
 
-    from geonode_spider.models.place import DmfwDivision
+    from dmfw_places_spider.models.place import DmfwDivision
     division_repository = SQLitePlaceRepository(settings.sqlite_path)
     division_repository.initialize()
-    from geonode_spider.storage.sqlite import SQLiteDivisionRepository
+    from dmfw_places_spider.storage.sqlite import SQLiteDivisionRepository
     root_repository = SQLiteDivisionRepository(settings.sqlite_path)
     root_repository.initialize()
     root_repository.upsert_divisions([DmfwDivision(code="35", name="福建省", parent_code="0", level="province")])

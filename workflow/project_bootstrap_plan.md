@@ -27,8 +27,8 @@
 ### Task 2: 配置与模型层
 
 **Files:**
-- Create: `src/geonode_spider/config/settings.py`
-- Create: `src/geonode_spider/models/region.py`
+- Create: `src/dmfw_places_spider/config/settings.py`
+- Create: `src/dmfw_places_spider/models/region.py`
 - Create: `tests/unit/test_config.py`
 
 - [ ] Step 1: 先写配置合并测试，明确 `.env` 与 YAML 的优先级
@@ -40,8 +40,8 @@
 ### Task 3: SQLite 与导出层
 
 **Files:**
-- Create: `src/geonode_spider/storage/sqlite.py`
-- Create: `src/geonode_spider/exporters/*.py`
+- Create: `src/dmfw_places_spider/storage/sqlite.py`
+- Create: `src/dmfw_places_spider/exporters/*.py`
 - Create: `tests/unit/test_sqlite_repository.py`
 - Create: `tests/integration/test_export_pipeline.py`
 
@@ -54,12 +54,12 @@
 ### Task 4: 请求层、流水线与入口
 
 **Files:**
-- Create: `src/geonode_spider/crawler/*.py`
-- Create: `src/geonode_spider/sources/*.py`
-- Create: `src/geonode_spider/geo/*.py`
-- Create: `src/geonode_spider/pipelines/*.py`
-- Create: `src/geonode_spider/services/*.py`
-- Create: `src/geonode_spider/cli.py`
+- Create: `src/dmfw_places_spider/crawler/*.py`
+- Create: `src/dmfw_places_spider/sources/*.py`
+- Create: `src/dmfw_places_spider/geo/*.py`
+- Create: `src/dmfw_places_spider/pipelines/*.py`
+- Create: `src/dmfw_places_spider/services/*.py`
+- Create: `src/dmfw_places_spider/cli.py`
 - Create: `scripts/*.py`
 
 - [ ] Step 1: 实现随机 UA、代理池、限速与 `SpiderSession` 骨架

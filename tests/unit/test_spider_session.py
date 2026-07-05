@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import requests
 
-from geonode_spider.crawler.profile import RequestProfile
-from geonode_spider.crawler.proxies import StaticProxyProvider
-from geonode_spider.crawler.session import SpiderSession
+from dmfw_places_spider.crawler.profile import RequestProfile
+from dmfw_places_spider.crawler.proxies import StaticProxyProvider
+from dmfw_places_spider.crawler.session import SpiderSession
 
 
 class FakeRequestsSession:

@@ -65,7 +65,7 @@ GeoNode-Spider/
 │   ├── processed/             # 本地 SQLite 主库等处理结果
 │   └── exports/               # json/csv/xlsx/db 导出产物
 ├── src/
-│   ├── geonode_spider/        # 地名列表采集器（ListPub 接口）
+│   ├── dmfw_places_spider/    # 地名列表采集器（ListPub 接口）
 │   │   ├── config/            # 配置加载
 │   │   ├── crawler/           # 请求会话、代理、限速、UA
 │   │   ├── exporters/         # 多格式导出
@@ -119,13 +119,13 @@ cp config/settings.example.yaml config/settings.yaml
 ### 3. 初始化数据库
 
 ```bash
-geonode-spider init-db
+dmfw-places init-db
 ```
 
 ### 4. 运行示例流水线
 
 ```bash
-geonode-spider run-pipeline --source mock --export all
+dmfw-places run-pipeline --source mock --export all
 ```
 
 ### 5. 运行民政部汉字集抓取（ListPub 接口）
@@ -133,13 +133,13 @@ geonode-spider run-pipeline --source mock --export all
 先同步并缓存省级行政区 code：
 
 ```bash
-geonode-spider sync-dmfw-divisions
+dmfw-places sync-dmfw-divisions
 ```
 
 推荐直接写入累计总库且只导出 db 的正式模式命令：
 
 ```bash
-geonode-spider run-dmfw-chars \
+dmfw-places run-dmfw-chars \
   --chars 村 \
   --match-mode contain \
   --write-total-db \
@@ -251,26 +251,26 @@ kill <pid>
 ### 6. 查看当前配置
 
 ```bash
-geonode-spider show-config
+dmfw-places show-config
 ```
 
 ## 常用命令
 
-### geonode-spider（ListPub 列表采集）
+### dmfw-places（ListPub 列表采集）
 
 ```bash
 # CLI（推荐）
-geonode-spider init-db
-geonode-spider show-config
-geonode-spider sample-data
-geonode-spider export --format all
-geonode-spider run-pipeline --source mock --export all
-geonode-spider sync-dmfw-divisions
-geonode-spider run-dmfw-chars --chars 村 --match-mode contain --write-total-db --total-db-path data/processed/dmfw_places_total.db --resume
-geonode-spider run-dmfw-chars --json config/dmfw-task.example.json
+dmfw-places init-db
+dmfw-places show-config
+dmfw-places sample-data
+dmfw-places export --format all
+dmfw-places run-pipeline --source mock --export all
+dmfw-places sync-dmfw-divisions
+dmfw-places run-dmfw-chars --chars 村 --match-mode contain --write-total-db --total-db-path data/processed/dmfw_places_total.db --resume
+dmfw-places run-dmfw-chars --json config/dmfw-task.example.json
 
 # 或直接用模块
-python3 -m geonode_spider init-db
+python3 -m dmfw_places_spider init-db
 ```
 
 ### dmfw-detail（DetailsPub 详情采集）
@@ -326,7 +326,7 @@ python3 scripts/run_dmfw_chars.py --chars 村 --match-mode contain --write-total
 - 失败退避
 - `requests.Session` 统一封装
 
-这部分能力集中在 `src/geonode_spider/crawler/` 下，避免把反爬逻辑散落在具体脚本里。
+这部分能力集中在 `src/dmfw_places_spider/crawler/` 下，避免把反爬逻辑散落在具体脚本里。
 
 ## 数据模型与存储
 

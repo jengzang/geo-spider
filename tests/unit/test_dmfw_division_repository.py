@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from geonode_spider.models.place import DmfwDivision
-from geonode_spider.storage.sqlite import SQLiteDivisionRepository
+from dmfw_places_spider.models.place import DmfwDivision
+from dmfw_places_spider.storage.sqlite import SQLiteDivisionRepository
 
 
 def test_division_repository_upserts_and_lists_root_divisions(tmp_path: Path) -> None:

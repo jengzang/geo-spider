@@ -4,7 +4,7 @@
 
 ## 背景
 
-已有 `src/geonode_spider/` 通过关键词搜索 `stname/listPub` 获取地名列表（~1144 万条），写入 `data/processed/dmfw_places_total.db`。
+已有 `src/dmfw_places_spider/` 通过关键词搜索 `stname/listPub` 获取地名列表（~1144 万条），写入 `data/processed/dmfw_places_total.db`。
 本项目从该总库导出的 `source_id` 出发，逐条请求详情接口。
 
 ## 依赖

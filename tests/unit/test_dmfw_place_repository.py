@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from geonode_spider.models.place import DmfwPlaceRecord
-from geonode_spider.storage.sqlite import SQLitePlaceRepository
+from dmfw_places_spider.models.place import DmfwPlaceRecord
+from dmfw_places_spider.storage.sqlite import SQLitePlaceRepository
 
 
 def test_place_repository_upserts_and_deduplicates_source_ids(tmp_path: Path) -> None:

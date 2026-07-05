@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from geonode_spider.cli import main
+from dmfw_places_spider.cli import main
 
 
 def test_cli_runs_dmfw_chars_pipeline(monkeypatch, tmp_path: Path) -> None:
@@ -27,7 +27,7 @@ def test_cli_runs_dmfw_chars_pipeline(monkeypatch, tmp_path: Path) -> None:
             "exported_files": {"json": str(tmp_path / "exports" / "dmfw_places.json")},
         }
 
-    monkeypatch.setattr("geonode_spider.cli.run_dmfw_chars_pipeline", fake_run_dmfw_chars_pipeline)
+    monkeypatch.setattr("dmfw_places_spider.cli.run_dmfw_chars_pipeline", fake_run_dmfw_chars_pipeline)
 
     exit_code = main(
         [
@@ -55,7 +55,7 @@ def test_cli_runs_dmfw_chars_pipeline(monkeypatch, tmp_path: Path) -> None:
     assert captured["chars"] == "尾村"
     assert captured["export_formats"] == ["json", "csv"]
     assert captured["resume"] is True
-    assert captured["sqlite_path"] == tmp_path / "data/processed/geonode_spider.db"
+    assert captured["sqlite_path"] == tmp_path / "data/processed/dmfw_places_spider.db"
     assert captured["match_mode"] == "contain"
     assert captured["province_codes"] == ["35", "44"]
     assert captured["flush_batch_size"] == 500
@@ -71,7 +71,7 @@ def test_cli_dmfw_default_export_is_db_only(monkeypatch, tmp_path: Path) -> None
         captured["export_formats"] = options.export_formats
         return {"run_id": "run-default-export", "place_count": 0, "source_name": "dmfw", "exported_files": {}}
 
-    monkeypatch.setattr("geonode_spider.cli.run_dmfw_chars_pipeline", fake_run_dmfw_chars_pipeline)
+    monkeypatch.setattr("dmfw_places_spider.cli.run_dmfw_chars_pipeline", fake_run_dmfw_chars_pipeline)
 
     exit_code = main([
         "--project-root",
@@ -123,7 +123,7 @@ def test_cli_runs_dmfw_chars_pipeline_from_json(monkeypatch, tmp_path: Path) -> 
         captured["total_db_path"] = options.total_db_path
         return {"run_id": "run-2", "place_count": 0, "source_name": "dmfw", "exported_files": {}}
 
-    monkeypatch.setattr("geonode_spider.cli.run_dmfw_chars_pipeline", fake_run_dmfw_chars_pipeline)
+    monkeypatch.setattr("dmfw_places_spider.cli.run_dmfw_chars_pipeline", fake_run_dmfw_chars_pipeline)
 
     exit_code = main([
         "--project-root",
@@ -150,10 +150,10 @@ def test_cli_runs_dmfw_chars_pipeline_from_json(monkeypatch, tmp_path: Path) -> 
 
 def test_cli_runs_sync_dmfw_divisions(monkeypatch, tmp_path: Path, capsys) -> None:
     def fake_sync_dmfw_divisions(*, settings):
-        assert settings.sqlite_path == tmp_path / "data/processed/geonode_spider.db"
+        assert settings.sqlite_path == tmp_path / "data/processed/dmfw_places_spider.db"
         return {"source_name": "dmfw", "division_count": 34, "codes": ["11", "12"]}
 
-    monkeypatch.setattr("geonode_spider.cli.sync_dmfw_divisions", fake_sync_dmfw_divisions)
+    monkeypatch.setattr("dmfw_places_spider.cli.sync_dmfw_divisions", fake_sync_dmfw_divisions)
 
     exit_code = main([
         "--project-root",
@@ -172,7 +172,7 @@ def test_cli_settings_default_dmfw_bypass_env_proxy(tmp_path: Path) -> None:
     config_dir.mkdir(parents=True)
     (config_dir / "settings.yaml").write_text("{}\n", encoding="utf-8")
 
-    from geonode_spider.config.settings import load_settings
+    from dmfw_places_spider.config.settings import load_settings
 
     settings = load_settings(project_root=tmp_path)
 
@@ -184,8 +184,8 @@ def test_cli_settings_default_sqlite_stores_dmfw_divisions(tmp_path: Path) -> No
     config_dir.mkdir(parents=True)
     (config_dir / "settings.yaml").write_text("{}\n", encoding="utf-8")
 
-    from geonode_spider.config.settings import load_settings
-    from geonode_spider.storage.sqlite import SQLiteDivisionRepository
+    from dmfw_places_spider.config.settings import load_settings
+    from dmfw_places_spider.storage.sqlite import SQLiteDivisionRepository
 
     settings = load_settings(project_root=tmp_path)
     repository = SQLiteDivisionRepository(settings.sqlite_path)

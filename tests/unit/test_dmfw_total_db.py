@@ -3,8 +3,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from geonode_spider.models.place import DmfwPlaceRecord
-from geonode_spider.storage.sqlite import SQLiteTotalPlaceRepository
+from dmfw_places_spider.models.place import DmfwPlaceRecord
+from dmfw_places_spider.storage.sqlite import SQLiteTotalPlaceRepository
 
 
 def _record(source_id: str, standard_name: str, place_code: str) -> DmfwPlaceRecord:

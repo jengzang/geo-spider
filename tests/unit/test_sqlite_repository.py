@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from geonode_spider.models.region import RegionNode
-from geonode_spider.storage.sqlite import SQLiteDivisionRepository, SQLiteRegionRepository
+from dmfw_places_spider.models.region import RegionNode
+from dmfw_places_spider.storage.sqlite import SQLiteDivisionRepository, SQLiteRegionRepository
 
 
 def test_repository_initializes_schema_and_roundtrips_regions(tmp_path: Path) -> None:

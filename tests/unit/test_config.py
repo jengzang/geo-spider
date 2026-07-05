@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from geonode_spider.config.settings import load_settings
+from dmfw_places_spider.config.settings import load_settings
 
 
 def test_load_settings_merges_yaml_and_env_with_env_precedence(tmp_path: Path, monkeypatch) -> None:

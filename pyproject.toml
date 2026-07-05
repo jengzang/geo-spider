@@ -29,7 +29,7 @@ parser = [
 ]
 
 [project.scripts]
-geonode-spider = "geonode_spider.cli:main"
+dmfw-places = "dmfw_places_spider.cli:main"
 dmfw-detail = "dmfw_details_spider.launch:main"
 dmfw-detail-status = "dmfw_details_spider.status:main"
 

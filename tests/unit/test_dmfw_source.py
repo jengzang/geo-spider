@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from geonode_spider.models.place import DmfwDivision, DmfwPlaceRecord
-from geonode_spider.sources.dmfw import DmfwCollector
+from dmfw_places_spider.models.place import DmfwDivision, DmfwPlaceRecord
+from dmfw_places_spider.sources.dmfw import DmfwCollector
 
 
 class FakeDmfwClient:

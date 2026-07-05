@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from geonode_spider.services.dmfw import DmfwProgressTracker
+from dmfw_places_spider.services.dmfw import DmfwProgressTracker
 
 
 def test_progress_tracker_persists_and_resumes_completed_partitions(tmp_path: Path) -> None:
