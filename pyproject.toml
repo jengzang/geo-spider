@@ -32,6 +32,7 @@ parser = [
 dmfw-places = "dmfw_places_spider.cli:main"
 dmfw-detail = "dmfw_details_spider.launch:main"
 dmfw-detail-status = "dmfw_details_spider.status:main"
+xzqh-spider = "xzqh_spider.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
