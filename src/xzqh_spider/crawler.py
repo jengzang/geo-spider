@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
-import random
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from queue import Queue
+from typing import NamedTuple
 
 import requests
 
@@ -16,13 +19,24 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://tool.51yww.com/shm/20"
 SEED_CODE = "110000000000"
-CHECKPOINT_INTERVAL = 20  # save progress every N pages
+CHECKPOINT_INTERVAL = 100
+
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+
+class Task(NamedTuple):
+    code: str
+    parent_code: str
 
 
 def crawl(
     *,
     db_path: str | Path,
-    delay: float = 0.5,
+    delay: float = 0.0,
+    workers: int = 8,
     resume: bool = False,
     checkpoint_path: str | Path | None = None,
     sample_limit: int = 0,
@@ -37,102 +51,123 @@ def crawl(
         completed = set(data.get("completed", []))
         logger.info(f"Resumed from checkpoint: {len(completed)} completed codes")
 
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-        ),
-    })
-
-    # Step 1: discover all provinces from the seed page
+    # Step 1: discover all provinces
     logger.info("Discovering provinces from seed page...")
-    province_codes = _discover_provinces(session, completed, delay)
+    province_codes = _discover_provinces(completed)
     logger.info(f"Discovered {len(province_codes)} provinces")
 
-    # Step 2: BFS crawl: province → city → district (district pages contain towns)
-    queue: list[tuple[str, str]] = [(code, "") for code in province_codes]  # (code, parent_code)
-    page_count = 0
+    # Step 2: concurrent crawl
+    queue: Queue[Task] = Queue()
+    for code in province_codes:
+        if code not in completed:
+            queue.put(Task(code, ""))
 
-    while queue:
-        code, parent_code = queue.pop(0)
+    lock = threading.Lock()
+    page_count = [0]
+    start_time = time.monotonic()
 
-        if code in completed:
-            continue
+    def worker() -> int:
+        session = requests.Session()
+        session.headers.update({"User-Agent": USER_AGENT})
+        worker_repo = XzqhRepository(db_path)
+        worker_repo.initialize()
+        fetched = 0
 
-        if sample_limit and page_count >= sample_limit:
-            logger.info(f"Sample limit {sample_limit} reached, stopping")
-            break
+        while True:
+            try:
+                task = queue.get(timeout=2)
+            except Exception:
+                break
 
-        url = f"{BASE_URL}/{_code_to_url(code)}.html"
-        logger.info(f"[{page_count + 1}] Fetching {url}")
+            code, parent_code = task.code, task.parent_code
 
-        try:
-            resp = session.get(url, timeout=30)
-            resp.raise_for_status()
-            resp.encoding = "utf-8"
-        except Exception as exc:
-            logger.error(f"Failed to fetch {url}: {exc}")
-            continue
+            with lock:
+                if sample_limit and page_count[0] >= sample_limit:
+                    queue.task_done()
+                    continue
+                if code in completed:
+                    queue.task_done()
+                    continue
+                completed.add(code)
+                cnt = page_count[0] + 1
+                page_count[0] = cnt
 
-        division, children = parse_page(resp.text, url)
-        division.parent_code = parent_code
+            url = f"{BASE_URL}/{_code_to_url(code)}.html"
 
-        # If this is a province page (first fetch), also save the children we just
-        # parsed as the province list -- but don't re-fetch them
-        if division.level == "province" and not province_codes:
-            pass  # we already have provinces from seed discovery
+            try:
+                resp = session.get(url, timeout=30)
+                resp.raise_for_status()
+                resp.encoding = "utf-8"
+            except Exception as exc:
+                logger.error(f"[{cnt}] Failed {url}: {exc}")
+                queue.task_done()
+                continue
 
-        repo.upsert(division)
-        completed.add(code)
-        page_count += 1
+            division, children = parse_page(resp.text, url)
+            division.parent_code = parent_code
+            worker_repo.upsert(division)
+            fetched += 1
 
-        child_count = len(children)
-        logger.info(
-            f"  -> {division.name} ({division.level}): "
-            f"stored, {child_count} children"
-        )
+            child_count = len(children)
+            elapsed = time.monotonic() - start_time
+            rate = cnt / elapsed if elapsed > 0 else 0
+            logger.info(
+                f"[{cnt}] {division.name} ({division.level}) "
+                f"{child_count} children | {rate:.1f} pg/s | queue: {queue.qsize()}"
+            )
 
-        if children:
-            if division.level in STOP_LEVELS:
-                # Terminal level: store children directly (they won't be fetched)
-                child_divisions = _children_to_divisions(children, parent_code=code, base_url=BASE_URL)
-                repo.upsert_many(child_divisions)
-                logger.info(f"  -> stored {len(child_divisions)} child divisions from {division.name}")
-            else:
-                # Enqueue children for further crawling
-                for child in children:
-                    child_code = child["code"]
-                    if child_code and child_code not in completed:
-                        queue.append((child_code, code))
+            if children:
+                if division.level in STOP_LEVELS:
+                    child_divs = _children_to_divisions(children, parent_code=code, base_url=BASE_URL)
+                    worker_repo.upsert_many(child_divs)
+                    fetched += len(child_divs)
+                else:
+                    for child in children:
+                        child_code = child["code"]
+                        if child_code:
+                            queue.put(Task(child_code, code))
 
-        logger.info(f"  Queue size: {len(queue)}")
+            # Checkpoint
+            if cnt % CHECKPOINT_INTERVAL == 0:
+                with lock:
+                    _save_checkpoint(cp_path, completed)
+                counts = worker_repo.count_by_level()
+                logger.info(f"  [checkpoint] {counts} | {cnt} pages, {rate:.1f} pg/s")
 
-        # Save checkpoint
-        if page_count % CHECKPOINT_INTERVAL == 0:
-            _save_checkpoint(cp_path, completed)
-            counts = repo.count_by_level()
-            logger.info(f"  [checkpoint] {counts}")
+            if delay > 0:
+                time.sleep(delay)
+            queue.task_done()
 
-        # Rate limiting
-        if delay > 0:
-            jitter = random.uniform(0, delay * 0.5)
-            time.sleep(delay + jitter)
+        session.close()
+        return fetched
 
-    # Final save
+    logger.info(f"Starting {workers} workers, {queue.qsize()} seed tasks in queue")
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(worker) for _ in range(workers)]
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as exc:
+                logger.error(f"Worker failed: {exc}")
+
     _save_checkpoint(cp_path, completed)
     counts = repo.count_by_level()
     total = repo.count()
-    logger.info(f"Crawl complete: {total} divisions stored, {counts}")
+    elapsed = time.monotonic() - start_time
+    logger.info(f"Crawl complete: {total} divisions in {elapsed:.0f}s, {counts}")
 
-    return {"total": total, "by_level": counts, "pages_fetched": page_count}
+    return {
+        "total": total,
+        "by_level": counts,
+        "pages_fetched": page_count[0],
+        "elapsed_seconds": round(elapsed, 1),
+    }
 
 
-def _discover_provinces(session: requests.Session, completed: set[str], delay: float) -> list[str]:
-    """Fetch the seed province page and extract all provinces from the 同级 table."""
+def _discover_provinces(completed: set[str]) -> list[str]:
     url = f"{BASE_URL}/{_code_to_url(SEED_CODE)}.html"
     try:
-        resp = session.get(url, timeout=30)
+        resp = requests.get(url, timeout=30, headers={"User-Agent": USER_AGENT})
         resp.raise_for_status()
         resp.encoding = "utf-8"
     except Exception as exc:
@@ -143,15 +178,10 @@ def _discover_provinces(session: requests.Session, completed: set[str], delay: f
     if not codes:
         logger.warning("No provinces found in seed page, using seed code only")
         return [SEED_CODE]
-
-    if delay > 0:
-        time.sleep(delay)
-
     return codes
 
 
 def _code_to_url(code: str) -> str:
-    """Convert 12-digit code to 9-digit URL code."""
     return code[:9]
 
 
@@ -164,7 +194,6 @@ def _children_to_divisions(
     now = utc_now_iso()
     for child in children:
         code = child["code"]
-        # Province/city/district: 6-digit display code; town: 9-digit
         if len(code) == 12 and code.endswith("000000"):
             short = code[:6]
         else:
@@ -174,7 +203,7 @@ def _children_to_divisions(
             name=child["name"],
             short_code=short,
             parent_code=parent_code,
-            level="town",  # children of district are towns
+            level="town",
             level_text="",
             full_name=child["name"],
             status=child.get("status", "正常"),

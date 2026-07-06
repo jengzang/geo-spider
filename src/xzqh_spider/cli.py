@@ -19,7 +19,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     crawl_parser = subparsers.add_parser("crawl", help="Run the crawl")
-    crawl_parser.add_argument("--delay", type=float, default=0.5, help="Seconds between requests (default: 0.5)")
+    crawl_parser.add_argument("--workers", type=int, default=8, help="Concurrent workers (default: 8)")
+    crawl_parser.add_argument("--delay", type=float, default=0.0, help="Per-request delay in seconds (default: 0)")
     crawl_parser.add_argument("--output", default="data/processed/xzqh.db", help="SQLite output path")
     crawl_parser.add_argument("--resume", action="store_true", help="Resume from checkpoint")
     crawl_parser.add_argument("--checkpoint", default=None, help="Checkpoint file path")
@@ -47,6 +48,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = crawl(
             db_path=args.output,
             delay=args.delay,
+            workers=args.workers,
             resume=args.resume,
             checkpoint_path=args.checkpoint,
             sample_limit=args.sample_limit,
