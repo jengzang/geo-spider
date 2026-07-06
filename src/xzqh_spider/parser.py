@@ -52,8 +52,18 @@ def _text_after(soup: BeautifulSoup, label: str) -> str:
     for tag in soup.find_all(string=lambda t: t and label in t):
         text = tag.strip()
         if text.startswith(label):
-            return text[len(label):].strip()
-    # Fallback: substring match
+            value = text[len(label):].strip()
+            if value:
+                return value
+            # Value may be in child elements (e.g. 状态：<span>停用</span>)
+            parent = tag.parent
+            if parent is not None:
+                full = parent.get_text(strip=True)
+                if label in full:
+                    value = full.split(label, 1)[-1].strip()
+                    if value:
+                        return value
+    # Fallback: substring match in parent text
     for tag in soup.find_all(string=lambda t: t and label in t):
         parent = tag.parent
         if parent is None:
@@ -61,7 +71,8 @@ def _text_after(soup: BeautifulSoup, label: str) -> str:
         text = parent.get_text(strip=True)
         if label in text:
             value = text.split(label, 1)[-1].strip()
-            return value
+            if value:
+                return value
     return ""
 
 
