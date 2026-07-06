@@ -162,6 +162,7 @@ def launch(config: Config) -> int:
                 result = merge_run_directory(
                     run_dir, master, run_id,
                     delete_after=False,  # 运行中不删 worker DB
+                    batch_size=config.merge_batch_size,
                 )
                 if result["total_read"] > 0:
                     logger.info(
@@ -241,6 +242,7 @@ def launch(config: Config) -> int:
         result = merge_run_directory(
             run_dir, master, run_id,
             delete_after=config.delete_worker_db_after_merge,
+            batch_size=config.merge_batch_size,
         )
         logger.info(
             f"汇总完成: 扫描 {result['scanned']} 个库, "

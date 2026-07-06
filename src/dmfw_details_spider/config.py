@@ -33,6 +33,7 @@ DEFAULTS = {
     "sync_ids_interval_seconds": 300,
     "merge_after_finish": False,
     "merge_interval": 0,
+    "merge_batch_size": 5000,
     "delete_worker_db_after_merge": True,
     "dry_run": False,
     "sample_limit": 0,
@@ -68,6 +69,7 @@ class Config:
     sync_ids_interval_seconds: int = 300
     merge_after_finish: bool = False
     merge_interval: int = 0
+    merge_batch_size: int = 5000
     delete_worker_db_after_merge: bool = True
     dry_run: bool = False
     sample_limit: int = 0

@@ -333,15 +333,72 @@ class MasterDB:
 
         _run_with_locked_retry(_upsert)
 
+    def bulk_upsert(self, records: list[dict], run_id: str) -> int:
+        """批量 upsert 到总库，单事务提交。返回成功写入条数。"""
+        if not records:
+            return 0
+
+        all_cols = ["id"] + DETAIL_COLS + MASTER_EXTRA_COLS
+        col_names = ",".join(all_cols)
+        placeholders = ",".join("?" for _ in all_cols)
+
+        set_parts = []
+        for c in DETAIL_COLS:
+            set_parts.append(f"{c}=excluded.{c}")
+        set_parts.append("last_seen_at=excluded.last_seen_at")
+        set_parts.append("source_run_id=excluded.source_run_id")
+        set_parts.append("source_worker_id=excluded.source_worker_id")
+        set_parts.append("merge_at=excluded.merge_at")
+        set_parts.append("first_seen_at=COALESCE(place_details.first_seen_at, excluded.first_seen_at)")
+
+        sql = (
+            f"INSERT INTO place_details ({col_names}) VALUES ({placeholders}) "
+            f"ON CONFLICT(id) DO UPDATE SET {', '.join(set_parts)}"
+        )
+
+        now = _now_iso()
+
+        def _bulk() -> None:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                for record in records:
+                    values = []
+                    for c in all_cols:
+                        if c == "first_seen_at":
+                            values.append(record.get("first_seen_at", now))
+                        elif c in ("last_seen_at", "merge_at"):
+                            values.append(now)
+                        elif c == "source_run_id":
+                            values.append(run_id)
+                        elif c == "source_worker_id":
+                            values.append(record.get("worker_id", ""))
+                        else:
+                            values.append(record.get(c))
+                    conn.execute(sql, values)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        _run_with_locked_retry(_bulk)
+        return len(records)
+
 
 # ---- 汇总 ----
+
+DEFAULT_MERGE_BATCH_SIZE = 5000
+
 
 def merge_worker_db(
     worker_db_path: str,
     master_db: MasterDB,
     run_id: str,
+    batch_size: int = DEFAULT_MERGE_BATCH_SIZE,
 ) -> dict:
-    """读取一个 worker 临时库，UPSERT 进总库。返回统计。"""
+    """读取一个 worker 临时库，分批 UPSERT 进总库。返回统计。"""
     if not os.path.exists(worker_db_path):
         return {"file": worker_db_path, "error": "文件不存在", "read": 0, "inserted": 0, "updated": 0}
 
@@ -352,18 +409,25 @@ def merge_worker_db(
         rows = worker_conn.execute("SELECT * FROM place_details").fetchall()
         before = master_db.count()
         errors = 0
+        total_read = len(rows)
 
-        for row in rows:
-            record = dict(row)
+        for i in range(0, total_read, batch_size):
+            batch = [dict(row) for row in rows[i:i + batch_size]]
             try:
-                master_db.upsert_place(record, run_id)
-            except Exception as exc:
-                errors += 1
-                logger.error(f"merge 单条失败 id={record.get('id', '?')}: {exc}")
+                master_db.bulk_upsert(batch, run_id)
+            except Exception:
+                logger.warning(
+                    f"批量 upsert 失败 (offset={i}, size={len(batch)})，"
+                    f"逐条回退以隔离问题记录"
+                )
+                for record in batch:
+                    try:
+                        master_db.upsert_place(record, run_id)
+                    except Exception as exc:
+                        errors += 1
+                        logger.error(f"merge 单条失败 id={record.get('id', '?')}: {exc}")
 
         after = master_db.count()
-        total_read = len(rows)
-        # 近似：新增 = 总库增长
         inserted = max(0, after - before)
 
         return {
@@ -386,8 +450,9 @@ def merge_run_directory(
     master_db: MasterDB,
     run_id: str,
     delete_after: bool = False,
+    batch_size: int = DEFAULT_MERGE_BATCH_SIZE,
 ) -> dict:
-    """扫描 run 目录下所有 worker_*.sqlite，逐个汇总进总库。"""
+    """扫描 run 目录下所有 worker_*.sqlite，分批汇总进总库。"""
     run_path = Path(run_dir)
     worker_files = sorted(run_path.glob("worker_*.sqlite"))
     if not worker_files:
@@ -401,7 +466,7 @@ def merge_run_directory(
 
     for wf in worker_files:
         logger.info(f"汇总 worker 库: {wf}")
-        r = merge_worker_db(str(wf), master_db, run_id)
+        r = merge_worker_db(str(wf), master_db, run_id, batch_size=batch_size)
         results.append(r)
         if r.get("error"):
             logger.error(f"  失败: {r['error']}")

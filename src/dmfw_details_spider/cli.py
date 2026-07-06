@@ -142,6 +142,12 @@ def add_merge_args(parser: argparse.ArgumentParser) -> None:
         help="所有 worker 结束后自动汇总到总库",
     )
     parser.add_argument(
+        "--merge-batch-size",
+        type=int,
+        default=DEFAULTS["merge_batch_size"],
+        help=f"合并总库时每批写入条数 (默认: {DEFAULTS['merge_batch_size']})",
+    )
+    parser.add_argument(
         "--delete-worker-db-after-merge",
         action="store_true",
         default=DEFAULTS["delete_worker_db_after_merge"],

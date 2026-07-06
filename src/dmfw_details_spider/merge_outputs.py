@@ -46,6 +46,7 @@ def main() -> None:
     result = merge_run_directory(
         worker_output_dir, master, run_id,
         delete_after=args.delete_worker_db_after_merge,
+        batch_size=args.merge_batch_size,
     )
 
     print()
