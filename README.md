@@ -406,16 +406,13 @@ xzqh-spider export --format db
 
 这些目录下的产物均在 `.gitignore` 中，不会提交到仓库。
 
-## 反爬设计
+## 请求层
 
-请求层集中在 `src/dmfw_places_spider/crawler/` 下：
+各包独立管理请求逻辑，避免反爬逻辑散落在业务代码中：
 
-- 随机 User-Agent
-- 代理池切换接口
-- 请求重试与失败退避
-- 随机休眠
-- `requests.Session` 统一封装
-- Token Bucket 限速（dmfw_details_spider）
+- `dmfw_places_spider/crawler/`：`SpiderSession` 统一封装、`RateLimiter` 退避限速、代理池切换、随机 UA
+- `dmfw_details_spider/`：`client.py` 封装 `DetailsApiClient` + `rate_limit.py` TokenBucket 限速、jitter、指数退避
+- `xzqh_spider/crawler.py`：内联 `requests.Session` + 固定 UA
 
 ## 测试
 
