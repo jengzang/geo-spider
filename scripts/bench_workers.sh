@@ -26,18 +26,18 @@ with open('$CONFIG', 'w') as f:
     pkill -f "dmfw_details_spider" 2>/dev/null
     sleep 2
     find src/dmfw_details_spider -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null
-    rm -rf crawler_output/workers/run_* 2>/dev/null
+    rm -rf data/interim/details_workers/run_* 2>/dev/null
 
     # 释放claimed
     $PY -c "
 from dmfw_details_spider.state_db import StateDB
-StateDB('crawler_state/details_progress.sqlite').release_all_claimed()
+StateDB('data/processed/details_progress.sqlite').release_all_claimed()
 " 2>/dev/null
 
     # 记下当前 done 数
     DONE_BEFORE=$($PY -c "
 from dmfw_details_spider.state_db import StateDB
-print(StateDB('crawler_state/details_progress.sqlite').get_stats()['done'])
+print(StateDB('data/processed/details_progress.sqlite').get_stats()['done'])
 ")
 
     # 启动，跑60秒
@@ -54,7 +54,7 @@ print(StateDB('crawler_state/details_progress.sqlite').get_stats()['done'])
     # 统计
     DONE_AFTER=$($PY -c "
 from dmfw_details_spider.state_db import StateDB
-print(StateDB('crawler_state/details_progress.sqlite').get_stats()['done'])
+print(StateDB('data/processed/details_progress.sqlite').get_stats()['done'])
 ")
 
     NEW=$((DONE_AFTER - DONE_BEFORE))
@@ -69,16 +69,16 @@ print(StateDB('crawler_state/details_progress.sqlite').get_stats()['done'])
     $PY -c "
 from dmfw_details_spider.output_db import MasterDB, merge_run_directory
 import os, glob
-run_dirs = glob.glob('crawler_output/workers/run_*')
+run_dirs = glob.glob('data/interim/details_workers/run_*')
 if run_dirs:
-    master = MasterDB('crawler_output/dmfw_place_details_master.sqlite')
+    master = MasterDB('data/processed/dmfw_place_details_master.sqlite')
     master.initialize()
     for d in run_dirs:
         merge_run_directory(d, master, os.path.basename(d), delete_after=True)
     print(f'  已合并')
 " 2>/dev/null
 
-    rm -rf crawler_output/workers/run_* 2>/dev/null
+    rm -rf data/interim/details_workers/run_* 2>/dev/null
 done
 
 # 恢复默认配置

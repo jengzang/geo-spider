@@ -28,8 +28,7 @@ env/
 config/settings.yaml
 
 # Logs
-logs/*
-!logs/.gitkeep
+logs/
 *.log
 *.out
 
@@ -53,8 +52,6 @@ data/id/*
 *.sqlite-wal
 *.sqlite-shm
 backups/
-crawler_output/
-crawler_state/
 
 # Editors and tooling
 .idea/

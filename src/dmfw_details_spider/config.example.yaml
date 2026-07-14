@@ -5,9 +5,9 @@
 id_files: []  # 启动时自动同步的 ID 文件列表
 
 # ---- 路径 ----
-state_db: crawler_state/details_progress.sqlite
-master_db: crawler_output/dmfw_place_details_master.sqlite
-worker_output_dir: crawler_output/workers
+state_db: data/processed/details_progress.sqlite
+master_db: data/processed/dmfw_place_details_master.sqlite
+worker_output_dir: data/interim/details_workers
 
 # ---- 性能 ----
 workers: 20            # worker 进程数

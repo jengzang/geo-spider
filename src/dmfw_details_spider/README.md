@@ -29,7 +29,7 @@ python3 scripts/export_source_ids.py
 python3 -m dmfw_details_spider.sync_ids \
   --id-file data/id/dmfw_places_single.txt \
   --id-file data/id/dmfw_places_multi.txt \
-  --state-db crawler_state/details_progress.sqlite
+  --state-db data/processed/details_progress.sqlite
 ```
 
 输出新增/已存在/各状态计数。重复运行只插入新增 ID。
@@ -53,9 +53,9 @@ python3 -m dmfw_details_spider.calibrate \
 ```bash
 python3 -m dmfw_details_spider.launch \
   --workers 1 \
-  --state-db crawler_state/details_progress.sqlite \
-  --master-db crawler_output/dmfw_place_details_master.sqlite \
-  --worker-output-dir crawler_output/workers \
+  --state-db data/processed/details_progress.sqlite \
+  --master-db data/processed/dmfw_place_details_master.sqlite \
+  --worker-output-dir data/interim/details_workers \
   --global-qps 2 \
   --sample-limit 20 \
   --dry-run
@@ -66,9 +66,9 @@ python3 -m dmfw_details_spider.launch \
 ```bash
 python3 -m dmfw_details_spider.launch \
   --workers 1 \
-  --state-db crawler_state/details_progress.sqlite \
-  --master-db crawler_output/dmfw_place_details_master.sqlite \
-  --worker-output-dir crawler_output/workers \
+  --state-db data/processed/details_progress.sqlite \
+  --master-db data/processed/dmfw_place_details_master.sqlite \
+  --worker-output-dir data/interim/details_workers \
   --global-qps 2 \
   --sample-limit 20
 ```
@@ -78,9 +78,9 @@ python3 -m dmfw_details_spider.launch \
 ```bash
 python3 -m dmfw_details_spider.launch \
   --workers 20 \
-  --state-db crawler_state/details_progress.sqlite \
-  --master-db crawler_output/dmfw_place_details_master.sqlite \
-  --worker-output-dir crawler_output/workers \
+  --state-db data/processed/details_progress.sqlite \
+  --master-db data/processed/dmfw_place_details_master.sqlite \
+  --worker-output-dir data/interim/details_workers \
   --global-qps 80 \
   --batch-size 100 \
   --request-timeout 10 \
@@ -92,8 +92,8 @@ python3 -m dmfw_details_spider.launch \
 
 ```bash
 python3 -m dmfw_details_spider.status \
-  --state-db crawler_state/details_progress.sqlite \
-  --master-db crawler_output/dmfw_place_details_master.sqlite
+  --state-db data/processed/details_progress.sqlite \
+  --master-db data/processed/dmfw_place_details_master.sqlite
 ```
 
 ### 中断后续跑
@@ -104,8 +104,8 @@ Ctrl+C 退出后，直接重新执行相同 launch 命令即可续跑。超时�
 
 ```bash
 python3 -m dmfw_details_spider.merge_outputs \
-  --worker-output-dir crawler_output/workers/run_20260704_153000 \
-  --master-db crawler_output/dmfw_place_details_master.sqlite
+  --worker-output-dir data/interim/details_workers/run_20260704_153000 \
+  --master-db data/processed/dmfw_place_details_master.sqlite
 ```
 
 加 `--delete-worker-db-after-merge` 汇总后删除临时库。
@@ -142,9 +142,9 @@ python3 -m dmfw_details_spider.merge_outputs \
 
 | 文件 | 说明 |
 |---|---|
-| `crawler_state/details_progress.sqlite` | 共享进度库，只有 `id_tasks` 表 |
-| `crawler_output/workers/<run_id>/worker_NNN.sqlite` | worker 临时库，每次运行新建 |
-| `crawler_output/dmfw_place_details_master.sqlite` | 长期累加总库，永不删除 |
+| `data/processed/details_progress.sqlite` | 共享进度库，只有 `id_tasks` 表 |
+| `data/interim/details_workers/<run_id>/worker_NNN.sqlite` | worker 临时库，每次运行新建 |
+| `data/processed/dmfw_place_details_master.sqlite` | 长期累加总库，永不删除 |
 
 ## 注意事项
 

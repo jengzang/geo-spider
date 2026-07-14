@@ -11,9 +11,9 @@ from pathlib import Path
 DEFAULTS = {
     "id_files": [],
     "id_file": "",
-    "state_db": "crawler_state/details_progress.sqlite",
-    "master_db": "crawler_output/dmfw_place_details_master.sqlite",
-    "worker_output_dir": "crawler_output/workers",
+    "state_db": "data/processed/details_progress.sqlite",
+    "master_db": "data/processed/dmfw_place_details_master.sqlite",
+    "worker_output_dir": "data/interim/details_workers",
     "logs_dir": "logs/dmfw_details_spider",
     "workers": 1,
     "worker_id": "worker_001",
@@ -47,9 +47,9 @@ DEFAULTS = {
 class Config:
     id_files: list[str] = field(default_factory=list)
     id_file: str = ""
-    state_db: str = "crawler_state/details_progress.sqlite"
-    master_db: str = "crawler_output/dmfw_place_details_master.sqlite"
-    worker_output_dir: str = "crawler_output/workers"
+    state_db: str = "data/processed/details_progress.sqlite"
+    master_db: str = "data/processed/dmfw_place_details_master.sqlite"
+    worker_output_dir: str = "data/interim/details_workers"
     logs_dir: str = "logs/dmfw_details_spider"
     workers: int = 1
     worker_id: str = "worker_001"
